@@ -14,7 +14,7 @@ const migColor = c => COLOR_MIGRATE[(c||"").toLowerCase()] || c || "#71b7ed";
 const DAY_NAMES = ["周一","周二","周三","周四","周五","周六","周日"];
 const KEY = "goalday-state-v2";
 const OLD_KEY = "goalday-state-v1";
-const BUILD = 51;   /* v51：复盘全新双层布局——时间维度切换+总体概览+细分拆解+AI小结 */
+const BUILD = 64;   /* v64：复盘渲染记忆化(切走切回秒开) + 去重日历渲染 + resize防抖 + SW shell缓存优先加速冷启动 */
 
 /* ───────── 日期工具 ───────── */
 function fmtDate(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
@@ -45,6 +45,7 @@ function defaultState(){
     todoLayer:"inbox", todoSel:"inbox",
     reviewDim:"week",
     reviewAnchor:todayStr(),   /* v44：复盘自定义周期锚点，null=今天 */
+    reviewCustomMonth:null,    /* v56：用户通过日历选择的特定月份 "2026-08"，null=跟随标签 */
     dayDate:todayStr(), monthOffset:0,
     habits:[
       {id:uid(),name:"早起喝水",emoji:"💧",color:"#88d8db",listId:l3,hidden:false,archived:false,checks:{},createdAt:Date.now()},
@@ -332,6 +333,20 @@ $("#drawerBtn2").addEventListener("click",openDrawer);
 $("#planBack").addEventListener("click",()=>{state.todoLayer="inbox";openListId=null;renderTodo();save();});
 $("#drawerMask").addEventListener("click",closeDrawer);
 $("#addListBtn").addEventListener("click",()=>{closeDrawer();openListModal();});
+
+/* v60：待办导航按钮 */
+const $btnGoHome=$("#btnGoHome"),$btnMore=$("#btnMore"),$moreMenu=$("#moreMenu");
+$btnGoHome.addEventListener("click",goTodoHome);
+$btnMore.addEventListener("click",e=>{e.stopPropagation();$moreMenu.hidden=!$moreMenu.hidden;});
+document.addEventListener("click",e=>{if(!e.target.closest("#btnMore")&&!e.target.closest("#moreMenu"))$moreMenu.hidden=true;});
+$$("#moreMenu button[data-more]").forEach(b=>{
+  b.addEventListener("click",()=>{
+    const tv=b.dataset.more;
+    if(tv==="stats"){$moreMenu.hidden=true;toast("灵感统计功能即将上线 📊");return;}
+    switchTodoLayer(tv);
+  });
+});
+
 $$("#drawer .ditem[data-tv]").forEach(b=>b.addEventListener("click",()=>{
   const tv=b.dataset.tv;
   if(tv==="plan"){state.todoLayer="plan";closeDrawer();renderTodo();return;}
@@ -342,14 +357,62 @@ function refreshTodo(){renderTodo();renderDrawer();}
 /* ── Tab1 主分发：按使用流程切换子视图 ── */
 function renderTodo(){
   const home=$("#todoHome"),plan=$("#todoPlan");
+  setupTodoHeader(state.todoLayer);
   if(state.todoLayer==="plan"){home.hidden=true;plan.hidden=false;renderTodoPlan();}
   else{
     home.hidden=false;plan.hidden=true;
-    if(state.todoLayer==="triage")renderTriage();
+    if(state.todoLayer==="home")renderTodoHome();
+    else if(state.todoLayer==="triage")renderTriage();
     else if(state.todoLayer==="lists")renderMyLists();
     else if(state.todoLayer==="trash")renderTrash();
     else{state.todoLayer="inbox";renderInbox();}
   }
+}
+
+/* v60：统一管理待办头部按钮（☰/‹/⋯），每个子视图调用 */
+function setupTodoHeader(layer){
+  const DB=$("#drawerBtn"),BK=$("#btnGoHome"),MR=$("#btnMore"),TT=$("#todoTitle");
+  DB.style.display="block";BK.style.display="none";MR.style.display="none";
+  if(layer==="home"){TT.textContent="📋 待办";}
+  else if(layer==="inbox"){DB.style.display="block";BK.style.display="none";MR.style.display="block";TT.textContent="💭 灵感收集箱";}
+  else if(layer==="triage"){DB.style.display="block";BK.style.display="none";TT.textContent="📂 待分类";}
+  else if(layer==="lists"||layer==="trash"){DB.style.display="none";BK.style.display="block";TT.textContent=layer==="lists"?"📋 我的清单":"🗑️ 回收站";}
+}
+
+/* v60：返回首页 / 上一级 */
+function goTodoHome(){
+  if(state.todoLayer==="lists"&&openListId){openListId=null;renderTodo();return;}
+  state.todoLayer="inbox";openListId=null;renderTodo();save();
+}
+function switchTodoLayer(layer){
+  $moreMenu.hidden=true;
+  state.todoLayer=layer;renderTodo();save();
+}
+
+/* v60：待办首页（三卡入口） */
+function renderTodoHome(){
+  const body=$("#todoBody");body.innerHTML="";
+  const wrap=document.createElement("div");wrap.className="todo-home-cards";
+  /* 待整理数量 */
+  const inboxN=state.inspirations.filter(n=>n.status==="inbox"||n.status==="triage").length;
+  /* 卡片1：灵感收集箱 */
+  const c1=document.createElement("button");c1.className="th-card";
+  c1.innerHTML=`<span class="th-icon">📥</span><span class="th-info"><span class="th-name">灵感收集箱${inboxN>0?`<span class="th-badge">${inboxN}</span>`:""}</span><span class="th-desc">随时记录一闪而过的念头</span></span><span class="th-arrow">›</span>`;
+  c1.addEventListener("click",()=>switchTodoLayer("inbox"));
+  wrap.appendChild(c1);
+  /* 卡片2：周计划 */
+  const c2=document.createElement("button");c2.className="th-card";
+  c2.innerHTML=`<span class="th-icon">📅</span><span class="th-info"><span class="th-name">周计划</span><span class="th-desc">拖拽安排一周任务与日程</span></span><span class="th-arrow">›</span>`;
+  c2.addEventListener("click",()=>{switchTodoLayer("plan");});
+  wrap.appendChild(c2);
+  /* 卡片3：我的清单 */
+  const listN=state.lists.length;
+  const c3=document.createElement("button");c3.className="th-card";
+  c3.innerHTML=`<span class="th-icon">📂</span><span class="th-info"><span class="th-name">我的清单${listN>0?`<span class="th-badge">${listN}</span>`:""}</span><span class="th-desc">查看所有已分类的任务清单</span></span><span class="th-arrow">›</span>`;
+  c3.addEventListener("click",()=>switchTodoLayer("lists"));
+  wrap.appendChild(c3);
+  body.appendChild(wrap);
+  applyEmoji();
 }
 
 /* ── 灵感数据助手 ── */
@@ -446,7 +509,6 @@ function enableSwipeRow(el,onLeft,onRight){
 
 /* ── 灵感收集箱（默认页 · Apple 圆点速记 升级版） ── */
 function renderInbox(){
-  $("#todoTitle").textContent="💭 灵感收集箱";
   const body=$("#todoBody");body.innerHTML="";
   const list=state.inspirations.filter(n=>n.status==="inbox");
   const wrap=document.createElement("div");wrap.className="insp-editor";
@@ -463,12 +525,12 @@ function renderInbox(){
   add.innerHTML=`<span class="ib-bullet" style="color:var(--ink-3)">○</span><span class="insp-add-input" style="color:var(--ink-3)">新增一条灵感…</span>`;
   add.addEventListener("click",()=>addInsp(""));
   body.appendChild(add);
-  /* 底部交互指引 + 今日已记录条数 */
-  const hint=document.createElement("div");hint.className="insp-hint";
+  /* v60：底部统计栏（替换原指引，展示今日记录 + 未分类数） */
   const todayN=state.inspirations.filter(n=>n.createdAt&&new Date(n.createdAt).toDateString()===new Date().toDateString()).length;
-  hint.innerHTML=`<span class="ih-swipe">💡 点击右侧「分类」按钮 → 归入我的清单</span><span class="ih-stat">📊 今日已记录 ${todayN} 条灵感</span>`;
-  body.appendChild(hint);
-  renderInspSelBar();
+  const uncatN=state.inspirations.filter(n=>n.status==="inbox"||n.status==="triage").length;
+  const stats=document.createElement("div");stats.className="inbox-stats";
+  stats.innerHTML=`📊 今日已记录 ${todayN} 条灵感<span class="sep">|</span>未分类 ${uncatN} 条`;
+  body.appendChild(stats);
   applyEmoji();
   /* 重建后自动聚焦（↓ 新建 / 底部新增） */
   if(pendingFocusId){
@@ -505,7 +567,10 @@ function inspRow(n){
   /* 右侧「分类」按钮：点击 → 弹清单选择器 → 归入（取代原左滑操作，更直接） */
   const cat=document.createElement("button");cat.className="ib-catbtn";cat.type="button";cat.textContent="分类";cat.title="归入我的清单";
   cat.addEventListener("click",e=>{e.stopPropagation();categorizeInsp(n.id);});
-  front.append(bullet,txt,cat);
+  /* 右侧「🗑️」删除按钮：点击直接移入回收站 */
+  const del=document.createElement("button");del.className="ib-delbtn";del.type="button";del.textContent="🗑️";del.title="移入回收站";
+  del.addEventListener("click",e=>{e.stopPropagation();trashInsp(n.id);});
+  front.append(bullet,txt,cat,del);
   if(n.img){const im=document.createElement("img");im.src=n.img;im.className="ib-img";front.appendChild(im);}
   row.appendChild(front);
   if(inspSel){
@@ -593,7 +658,6 @@ function enableSwipeReveal(row,opts){
 
 /* ── 待分类（未分类灵感的筛选视图，与收集箱同源；直接点「分类」归入） ── */
 function renderTriage(){
-  $("#todoTitle").textContent="📂 待分类";
   const body=$("#todoBody");body.innerHTML="";
   /* 待分类 = 所有未分类灵感（inbox 与 triage 状态）的同源视图 */
   const list=state.inspirations.filter(n=>n.status==="inbox"||n.status==="triage");
@@ -612,12 +676,15 @@ function renderTriage(){
     row.appendChild(front);
     body.appendChild(row);
   });
+  /* v60：底部指引 */
+  const hint=document.createElement("div");hint.className="triage-bottom-hint";
+  hint.innerHTML=`💡 点击「分类」→ 归入我的清单<br>分类后灵感从待分类消失，出现在对应清单中`;
+  body.appendChild(hint);
   applyEmoji();
 }
 
 /* ── 我的清单（列表 → 清单详情） ── */
 function renderMyLists(){
-  $("#todoTitle").textContent="📋 我的清单";
   const body=$("#todoBody");body.innerHTML="";
   if(openListId){renderListDetail(openListId,body);applyEmoji();return;}
   state.lists.forEach(l=>{
@@ -652,7 +719,6 @@ function renderListDetail(id,body){
 
 /* ── 回收站（30 天） ── */
 function renderTrash(){
-  $("#todoTitle").textContent="🗑️ 回收站";
   const body=$("#todoBody");body.innerHTML="";
   purgeTrash();
   const list=state.inspirations.filter(n=>n.status==="trash");
@@ -2337,24 +2403,45 @@ function roundRect(ctx,x,y,w,h,r){
 }
 
 /* ═══════════ Tab4 复盘（视图 + 统计 合并） ═══════════ */
-$$("#revDims button").forEach(b=>b.addEventListener("click",()=>{state.reviewDim=b.dataset.d;renderReview();save();}));
-/* v48：复盘 ‹ › 箭头切换周期（替代已移除的日期选择器） */
+/* v56：修复标签点击——切换时间维度 + 清除自定义月份 + 重置锚点为今天 */
+$$("#revDims button").forEach(b=>{
+  b.addEventListener("click",()=>{
+    state.reviewDim=b.dataset.d;
+    state.reviewCustomMonth=null;    // 切换标签时退出自定义月份模式
+    state.reviewAnchor=todayStr();   // 回到今天
+    renderReview();save();
+  });
+});
+/* v48：复盘 ‹ › 箭头切换周期 */
 $("#revPrev").addEventListener("click",()=>{
   const d=revAnchorDate();
-  if(state.reviewDim==="week")d.setDate(d.getDate()-7);
+  if(state.reviewCustomMonth){ // 自定义月份模式：按月切换
+    d.setMonth(d.getMonth()-1);
+    const m=d.getMonth()+1,y=d.getFullYear();
+    state.reviewCustomMonth=y+"-"+String(m).padStart(2,"0");
+    state.reviewAnchor=fmtDate(new Date(y,m-1,1));
+  }else if(state.reviewDim==="week")d.setDate(d.getDate()-7);
   else if(state.reviewDim==="month")d.setMonth(d.getMonth()-1);
   else d.setFullYear(d.getFullYear()-1);
   state.reviewAnchor=fmtDate(d);renderReview();save();
 });
 $("#revNext").addEventListener("click",()=>{
   const d=revAnchorDate();
+  if(state.reviewCustomMonth){
+    d.setMonth(d.getMonth()+1);
+    const m=d.getMonth()+1,y=d.getFullYear();
+    state.reviewCustomMonth=y+"-"+String(m).padStart(2,"0");
+    state.reviewAnchor=fmtDate(new Date(y,m-1,1));
+    state.reviewAnchor=fmtDate(d);renderReview();save();return;
+  }
   if(state.reviewDim==="week")d.setDate(d.getDate()+7);
   else if(state.reviewDim==="month")d.setMonth(d.getMonth()+1);
   else d.setFullYear(d.getFullYear()+1);
   state.reviewAnchor=fmtDate(d);renderReview();save();
 });
-/* v51：回到当前周期按钮 —— 一键把锚点重置为今天 */
+/* v51：回到当前周期按钮 */
 $("#revToday").addEventListener("click",()=>{
+  state.reviewCustomMonth=null;
   state.reviewAnchor=todayStr();renderReview();save();
   toast("📍 已回到当前周期");
 });
@@ -2367,17 +2454,23 @@ function revAnchorDate(){
   return isNaN(d.getTime())?new Date():d;
 }
 function revRange(){
+  /* v56: 用户通过日历选择了特定月份 → 强制 month 维度只显示该月 */
+  if(state.reviewCustomMonth){
+    const [cy,cm]=state.reviewCustomMonth.split("-");
+    const y=parseInt(cy,10),m=parseInt(cm,10)-1;
+    const n=new Date(y,m+1,0).getDate();
+    const ds=[];for(let i=1;i<=n;i++)ds.push(fmtDate(new Date(y,m,i)));
+    return {dates:ds,label:`${y}-${String(m+1).padStart(2,"0")}月`,displayLabel:`${y}年${m+1}月`,isDay:false,isYear:false};
+  }
   const dim=state.reviewDim,anc=revAnchorDate();
-  if(dim==="day"){const ds=todayStr();const now=new Date();return {dates:[ds],label:`当前查看：${now.getMonth()+1}月${now.getDate()}日 ${DAY_NAMES[(now.getDay()+6)%7]}`,isDay:true,isYear:false};}
+  if(dim==="day"){const ds=todayStr();const now=new Date();const dLabel=`${now.getFullYear()}年 ${now.getMonth()+1}月${now.getDate()}日`;return {dates:[ds],label:`当前查看：${dLabel}`,displayLabel:dLabel,isDay:true,isYear:false};}
   if(dim==="week"){
     const m=new Date(anc);m.setHours(0,0,0,0);m.setDate(m.getDate()-((m.getDay()+6)%7));
     const ds=[];for(let i=0;i<7;i++){const d=new Date(m);d.setDate(m.getDate()+i);ds.push(fmtDate(d));}
-    const wk=isoWeek(m);
-    const s0=ds[0].slice(5).replace("-","."),s6=ds[6].slice(5).replace("-",".");
-    return {dates:ds,label:`当前查看：第${wk}周｜${s0}‑${s6}`,isDay:false,isYear:false};
+    const wk=isoWeek(m);return {dates:ds,label:`第${wk}周`,displayLabel:`${anc.getFullYear()}年`,isDay:false,isYear:false};
   }
-  if(dim==="month"){const y=anc.getFullYear(),m=anc.getMonth();const n=new Date(y,m+1,0).getDate();const ds=[];for(let i=1;i<=n;i++)ds.push(fmtDate(new Date(y,m,i)));return {dates:ds,label:`当前查看：${y}-${String(m+1).padStart(2,"0")}月`,isDay:false,isYear:false};}
-  const y=anc.getFullYear();const ds=[];for(let m=0;m<12;m++)ds.push(`${y}-${String(m+1).padStart(2,"0")}`);return {dates:ds,label:`当前查看：${y}年`,isDay:false,isYear:true};
+  if(dim==="month"){const y=anc.getFullYear(),m=anc.getMonth();const n=new Date(y,m+1,0).getDate();const ds=[];for(let i=1;i<=n;i++)ds.push(fmtDate(new Date(y,m,i)));return {dates:ds,label:`${y}-${String(m+1).padStart(2,"0")}月`,displayLabel:`${y}年`,isDay:false,isYear:false};}
+  const y=anc.getFullYear();const ds=[];for(let m=0;m<12;m++)ds.push(`${y}-${String(m+1).padStart(2,"0")}`);return {dates:ds,label:`${y}年`,displayLabel:`${y}年`,isDay:false,isYear:true};
 }
 function revRangeShifted(dim){
   const anc=revAnchorDate();
@@ -2386,65 +2479,154 @@ function revRangeShifted(dim){
   if(dim==="month"){const y=anc.getFullYear(),m=anc.getMonth()-1;const n=new Date(y,m+1,0).getDate();const out=[];for(let i=1;i<=n;i++)out.push(fmtDate(new Date(y,m,i)));return out;}
   const y=anc.getFullYear()-1;const out=[];for(let m=0;m<12;m++)out.push(`${y}-${String(m+1).padStart(2,"0")}`);return out;
 }
+/* v56：日历选择器 —— 点击"2026年"弹出12个月份网格，选择具体月份 */
+function toggleRevCalendar(){
+  let pop=$("#revCalendarPopup");
+  if(pop && pop.style.display!=="none"){pop.remove();return;}
+  if(pop)pop.remove();
+  pop=document.createElement("div");pop.id="revCalendarPopup";pop.className="rev-cal-popup";
+  const anc=revAnchorDate();
+  let calYear=anc.getFullYear();
+  const monthNames=["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+  function renderCal(){
+    const todayM=todayStr().slice(0,7); // "2026-08"
+    const curMonth=state.reviewCustomMonth||todayM;
+    let html='<div class="rcp-header">'
+      +'<button class="rcp-nav" id="rcpPrev">◀</button>'
+      +'<span class="rcp-title">'+calYear+'年</span>'
+      +'<button class="rcp-nav" id="rcpNext">▶</button>'
+      +'</div>'
+      +'<div class="rcp-month-grid">';
+    for(let m=0;m<12;m++){
+      const key=calYear+"-"+String(m+1).padStart(2,"0");
+      const isToday=key===todayM;
+      const isSel=key===curMonth;
+      html+='<button class="rcp-month'+(isToday?' today':'')+(isSel?' sel':'')+'" data-month="'+key+'">'
+        +monthNames[m]+'</button>';
+    }
+    html+='</div>';
+    pop.innerHTML=html;
+    pop.querySelector("#rcpPrev").onclick=function(e){e.stopPropagation();calYear--;renderCal();};
+    pop.querySelector("#rcpNext").onclick=function(e){e.stopPropagation();calYear++;renderCal();};
+    pop.querySelectorAll(".rcp-month").forEach(btn=>{
+      btn.onclick=function(e){
+        e.stopPropagation();
+        state.reviewCustomMonth=btn.dataset.month;
+        const [y,m2]=state.reviewCustomMonth.split("-");
+        state.reviewDim="month";
+        state.reviewAnchor=y+"-"+m2+"-01";
+        pop.remove();
+        renderReview();save();
+      };
+    });
+  }
+  renderCal();
+  const rl=$("#revRangeLabel");
+  rl.parentNode.insertBefore(pop,rl.nextSibling);
+  setTimeout(()=>{
+    document.addEventListener("click",function closeCal(e){
+      if(!pop||!pop.parentNode)return;
+      if(!pop.contains(e.target)&&e.target!==rl&&e.target.parentNode!==rl){
+        pop.remove();
+        document.removeEventListener("click",closeCal);
+      }
+    });
+  },50);
+}
 function rateOf(dates,isYear){const inR=ds=>ds&&(isYear?dates.includes(ds.slice(0,7)):dates.includes(ds));const p=state.tasks.filter(t=>!t.abandoned&&inR(t.due));return p.length?Math.round(p.filter(t=>t.done).length/p.length*100):null;}
-/* 复盘进入/切换：轻量骨架屏 + 同步重算，出错不白屏；不整页重载，仅局部刷新
-   v44：manual=true 表示用户点了右上角刷新按钮 → 旋转动画 + 成功/失败 toast */
+/* v56：轻量加载态 —— 切换时间维度时 dataView 添加 loading 类产生微妙脉冲，渲染完成后移除 */
+function revShowSkeleton(){
+  const dv=$("#dataView");if(!dv)return;
+  dv.classList.add("loading");
+}
+function revHideSkeleton(){
+  const dv=$("#dataView");if(dv)dv.classList.remove("loading");
+}
+/* 复盘进入/切换：v56 重写——标签逻辑 + 骨架屏 + 日历月份选择器 */
+/* v64：复盘渲染记忆化 —— 周期(维度/锚点/自定义月/示例开关) + 数据轻量签名 未变时，
+   直接复用已渲染的 DOM，跳过整段 paintReview（全量数据重算 + 所有 canvas 重绘）。
+   根治「切走再切回复盘 / 切回前台 / 窗口缩放」时的重复卡顿。手动刷新(revRefresh)仍强制重渲染。 */
+let lastRevKey="";
+function revRenderKey(){
+  const ts=state.tasks||[];let doneN=0;
+  for(let i=0;i<ts.length;i++){if(ts[i]&&ts[i].done)doneN++;}
+  const hs=state.habits||[];let chkN=0;
+  for(let i=0;i<hs.length;i++){const c=hs[i]&&hs[i].checks;if(c)chkN+=Object.keys(c).length;}
+  const recs=(state.pomo&&state.pomo.records)||[];
+  return (state.reviewDim||"")+"|"+(state.reviewAnchor||"")+"|"+(state.reviewCustomMonth||"")+"|"+(state.revDemoDismissed?1:0)+"|"+ts.length+"|"+doneN+"|"+recs.length+"|"+hs.length+"|"+chkN;
+}
 function renderReview(manual){
-  $$("#revDims button").forEach(b=>b.classList.toggle("active",b.dataset.d===state.reviewDim));
+  try{
   const dataView=$("#dataView");
-  const oldErr=dataView.querySelector(".rev-error"); if(oldErr)oldErr.remove();
+  if(!dataView){console.error("[复盘] dataView不存在!");return;}
+  try{const oldErr=dataView.querySelector(".rev-error");if(oldErr)oldErr.remove();}catch(e){}
+  /* v64：渲染记忆化早退 —— 周期与数据均未变化且非手动刷新时，直接复用上次结果 */
+  const _key=revRenderKey();
+  if(_key===lastRevKey && !manual){
+    try{revHideSkeleton();const b=$("#revRefresh");if(b)b.classList.remove("spinning");}catch(e){}
+    return;
+  }
+  /* 超时保护：显示骨架屏 */
+  let skelTimer=null;
+  const showSkel=()=>{
+    if(skelTimer)return;
+    skelTimer=setTimeout(()=>{revShowSkeleton();},150);
+  };
+  showSkel();
   let range;
   try{ range=revRange(); }
-  catch(err){ console.error("复盘取数失败",err); revFatal(err); if(manual)stopRevSpin(false); return; }
-  $("#revRangeLabel").textContent=range.label||"";
-  /* v51：自动小标题 —— 如「2026年8月 整体执行复盘」 */
-  const subEl=$("#revSubtitle");
-  if(subEl){
-    const anc=revAnchorDate();
-    const dim=state.reviewDim;
-    let sub="";
-    if(dim==="week"){
-      const m=new Date(anc);m.setHours(0,0,0,0);m.setDate(m.getDate()-((m.getDay()+6)%7));
-      const wk=isoWeek(m);
-      sub=`${anc.getFullYear()}年 第${wk}周 整体执行复盘`;
-    }else if(dim==="month"){
-      sub=`${anc.getFullYear()}年 ${anc.getMonth()+1}月 整体执行复盘`;
-    }else{
-      sub=`${anc.getFullYear()}年 整体执行复盘`;
-    }
-    subEl.textContent=sub;
-  }
-  /* v51：回到当前按钮仅在锚点≠今天时显示 */
-  const todayBtn=$("#revToday");
-  if(todayBtn)todayBtn.style.display=(state.reviewAnchor===todayStr())?"none":"";
-  if(manual){
-    const btn=$("#revRefresh"); if(btn)btn.classList.add("spinning");
+  catch(err){revFatal(err);if(manual)stopRevSpin(false);return;}
+  clearTimeout(skelTimer);skelTimer=null;
+  /* 更新标签激活态 + 日期标签 */
+  const dim=state.reviewDim;
+  $$("#revDims button").forEach(b=>b.classList.toggle("active",b.dataset.d===dim));
+  const anc=revAnchorDate();
+  const rl=$("#revRangeLabel");
+  /* v56: 标签文本逻辑 */
+  if(state.reviewCustomMonth){
+    const [cy,cm]=state.reviewCustomMonth.split("-");
+    const monthNames=["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+    rl.textContent=cy+"年 "+monthNames[parseInt(cm,10)-1];
+    rl.title="点击选择月份";
   }else{
-    toast("📊 正在加载复盘数据...");
-    dataView.classList.add("rev-skel");   /* v44：切换 tab 时骨架占位，不空白 */
+    rl.textContent=anc.getFullYear()+"年";
+    rl.title="点击年份选择月份";
   }
-  const loadingGuard=setTimeout(()=>{
-    const dv2=$("#dataView");
-    if(dv2.classList.contains("rev-skel")){ dv2.classList.remove("rev-skel"); }
-    if(manual)stopRevSpin(false);
-  },3000);
+  rl.style.cursor="pointer";
+  const prevPopup=document.getElementById("revCalendarPopup");if(prevPopup)prevPopup.remove();
+  rl.onclick=function(e){e.stopPropagation();toggleRevCalendar();};
+  /* 副标题 */
+  const subEl=$("#revSubtitle");
+  try{
+  if(subEl){
+    const m=new Date(anc);
+    if(state.reviewCustomMonth){const [cy,cm]=state.reviewCustomMonth.split("-");subEl.textContent=cy+"年 "+parseInt(cm,10)+"月 复盘";}
+    else if(dim==="week"){m.setDate(m.getDate()-((m.getDay()+6)%7));subEl.textContent=anc.getFullYear()+"年 第"+isoWeek(m)+"周 复盘";}
+    else if(dim==="month"){subEl.textContent=anc.getFullYear()+"年 "+(anc.getMonth()+1)+"月 复盘";}
+    else{subEl.textContent=anc.getFullYear()+"年 复盘";}
+  }}catch(e){}
+  /* 今天按钮 */
+  const todayBtn=$("#revToday");
+  if(todayBtn)todayBtn.style.display=((state.reviewAnchor===todayStr()||state.reviewAnchor===null)&&!state.reviewCustomMonth)?"none":"";
+  /* 刷新按钮 */
+  if(manual){const btn=$("#revRefresh");if(btn)btn.classList.add("spinning");}
   requestAnimationFrame(()=>{
     let ok=false;
     try{
       paintReview(range.dates,range.isDay,range.isYear);
-      ["#revUtil","#revFocusHeat","#revFocusTrend","#revCal","#revQuadrant","#revTaskTrend"].forEach(s=>{const el=$(s);if(el){el.classList.remove("fade-in");void el.offsetWidth;el.classList.add("fade-in");}});
-      ensurePanelsNotEmpty();
+      lastRevKey=_key;
       ok=true;
-      if(manual) setTimeout(()=>toast("✅数据已刷新，为最新版本"),200);
+      revHideSkeleton();
+      if(manual)setTimeout(()=>toast("✅数据已刷新"),200);
     }catch(err){
-      console.error("复盘渲染失败",err); revFatal(err);
-      if(manual) setTimeout(()=>toast("⚠️刷新失败，请重试"),200);
-    }finally{
-      clearTimeout(loadingGuard);
-      dataView.classList.remove("rev-skel");
-      if(manual)stopRevSpin(ok);
-    }
+      console.error("复盘渲染失败",err);
+      try{revFatal(err);}catch(e2){console.error("revFatal也失败了",e2);}
+      if(manual)setTimeout(()=>toast("⚠️刷新失败，请重试"),200);
+    }finally{if(manual)stopRevSpin(ok);}
   });
+  }catch(e){console.error("[复盘] renderReview顶层异常",e);
+    try{const dv=$("#dataView");if(dv){dv.innerHTML='<div style="padding:20px;color:red;font-size:14px">复盘页面加载异常：'+esc(String(e).slice(0,200))+' ✨</div>';}}catch(e2){}
+  }
 }
 /* v44：停止刷新按钮旋转动画 */
 function stopRevSpin(ok){const btn=$("#revRefresh");if(btn)btn.classList.remove("spinning");}
@@ -2478,6 +2660,266 @@ const REV_EMPTY_TIP="该周期暂时还没有记录哦，开始行动之后就�
 function revEmptyTip(){return `<div class="rev-empty">${REV_EMPTY_TIP}</div>`;}
 /* 单张图表绘制容错：某图异常不连累其它模块，也不中断整体渲染 */
 function safeDraw(fn){try{fn();}catch(e){console.error("图表绘制失败",e);}}
+/* v53：用户无数据时渲染完整示例预览 —— 包含 KPI 环形图、饼图、柱状图、折线图、习惯列表、AI 小结
+   参考 Forest / TickTick / Notion：新手首次打开复盘页立即可见可视化全貌，开始记录后自动替换为真实数据 */
+function paintReviewDemoRich(dates, isDay, isYear, rangeLen, dayLabels) {
+  const hrs = m => Math.round(m / 6) / 10;
+  const safeWrite = (id, html) => { const el = $(id); if (!el) return; try { el.innerHTML = html; } catch (e) { console.error("[Demo] " + id + " 写入失败", e); } };
+  const showEl = s => { const el = $(s); if (el) el.style.display = ""; };
+  const hideEl = s => { const el = $(s); if (el) el.style.display = "none"; };
+  const ringPct = (pct, color) => {
+    const circ = 2 * Math.PI * 28;
+    const off = circ * (1 - pct / 100);
+    return '<svg viewBox="0 0 72 72"><circle cx="36" cy="36" r="28" fill="none" stroke="var(--bg-soft)" stroke-width="4"/><circle cx="36" cy="36" r="28" fill="none" stroke="' + color + '" stroke-width="4" stroke-linecap="round" stroke-dasharray="' + circ + '" stroke-dashoffset="' + off + '" transform="rotate(-90 36 36)" style="transition:stroke-dashoffset 1.2s ease"/></svg>';
+  };
+  const kpiC = (v) => (v >= 70 ? "var(--green)" : v >= 40 ? "#F59E0B" : "var(--red)");
+  const kpiT = (v) => (v >= 70 ? "good" : v >= 40 ? "ok" : v > 0 ? "warn" : "low");
+
+  /* Demo 数据生成 */
+  const utilVals = dates.map((_, i) => Math.max(1, isYear ? (4 + Math.round(3 * Math.sin(i / 1.7))) : (2 + (i % 3) + (i === 0 || i === 6 ? 0 : 1))));
+  const plannedN = utilVals.reduce((s, v) => s + v, 0);
+  const doneN = Math.round(plannedN * 0.72);
+  const rate = Math.round(doneN / plannedN * 100);
+  const schedT = Math.round(plannedN * 0.8);
+  const schedDone = Math.round(schedT * 0.66);
+  const schedRate = schedT ? Math.round(schedDone / schedT * 100) : 0;
+  const overdueCnt = 2;
+  const autoNew = Math.round(plannedN * 0.28);
+  const wkBase = [210, 175, 90, 250, 180, 120, 55];
+  const focusMin = isDay ? 150 : (isYear ? wkBase.reduce((s, v) => s + v, 0) * 4 : wkBase.reduce((s, v) => s + v, 0));
+  const pomoCnt = Math.max(1, Math.round(focusMin / 25));
+  const avgMin = 25;
+  const focusTrend = dates.map((_, i) => isYear ? Math.round((4 + 2 * Math.sin(i / 2.2)) * 10) / 10 : Math.round((wkBase[i % 7] / 60) * 10) / 10);
+  const dailyMin = dates.map((_, i) => isYear ? Math.round((4 + 2 * Math.sin(i / 2.2)) * 60) : wkBase[i % 7] || 0);
+  const taskTrendVals = dayLabels.map((_, i) => i % 3 === 0 ? 100 : (i % 5 === 0 ? 33 : (50 + Math.round(50 * Math.sin(i / 1.8)))));
+  const demoHd = [
+    { name: "早起喝水", emoji: "💧", color: "#88d8db", c: Math.round(rangeLen * 0.78), rate: 78, streak: 12 },
+    { name: "阅读30分钟", emoji: "📖", color: "#b8aeeb", c: Math.round(rangeLen * 0.64), rate: 64, streak: 5 },
+    { name: "运动20分钟", emoji: "🏃", color: "#84c3b7", c: Math.round(rangeLen * 0.5), rate: 50, streak: 3 },
+  ];
+  const habitRate = Math.round(demoHd.reduce((s, o) => s + o.rate, 0) / demoHd.length);
+  const habitDays = Math.round(rangeLen * habitRate / 100);
+  const demoTypes = { "工作": Math.round(plannedN * 0.45), "学习": Math.round(plannedN * 0.30), "生活": plannedN - Math.round(plannedN * 0.45) - Math.round(plannedN * 0.30) };
+  const typeColors = ["#7FB89A", "#b8aeeb", "#F59E0B"];
+
+  /* 示例标签横幅 */
+  let banner = $("#revDemoBanner");
+  if (!banner) {
+    banner = document.createElement("div"); banner.id = "revDemoBanner"; banner.className = "rev-demo-banner";
+    const lbl = $("#revRangeLabel");
+    (lbl ? lbl.parentNode : $("#dataView")).insertBefore(banner, lbl ? lbl.nextSibling : null);
+  }
+  banner.innerHTML = '<div class="rev-demo-tag">📊 示例预览</div>'
+    + '<div class="rev-demo-text">这是你开始记录后的复盘模样～开始使用以下功能后，真实数据会自动替换这里：</div>'
+    + '<div class="rev-demo-btns">'
+    + '<button id="revDemoInject" class="rev-demo-btn primary">✨ 一键填入示例数据</button>'
+    + '<button id="revDemoDismiss" class="rev-demo-btn">我知道了</button></div>';
+  const injBtn = banner.querySelector("#revDemoInject");
+  const disBtn = banner.querySelector("#revDemoDismiss");
+  if (injBtn) injBtn.addEventListener("click", function () { if (typeof injectDemoData === "function") { injectDemoData(); } else { toast("示例功能暂不可用"); } });
+  if (disBtn) disBtn.addEventListener("click", function () { state.revDemoDismissed = true; save(); removeDemoBanner(); renderReview(); });
+
+  /* 显示所有面板，隐藏空态引导 */
+  hideEl("#revEmptyGuide");
+  ["#rvTaskPanel", "#rvFocusPanel", "#rvHabitPanel", "#rvSchedPanel"].forEach(p => showEl(p));
+  showEl("#revAISummary");
+
+  /* ── KPI 大盘 ── */
+  let kpiHtml = "";
+  kpiHtml += '<div class="kpi-card ' + kpiT(rate) + '"><div class="kpi-ring">' + ringPct(rate, kpiC(rate)) + '<span class="kpi-val">' + rate + '%</span></div><div class="kpi-label">任务完成率</div><div class="kpi-sub">' + doneN + '/' + plannedN + '个</div></div>';
+  kpiHtml += '<div class="kpi-card ' + kpiT(schedRate) + '"><div class="kpi-ring">' + ringPct(schedRate, kpiC(schedRate)) + '<span class="kpi-val">' + schedRate + '%</span></div><div class="kpi-label">日程执行率</div><div class="kpi-sub">' + schedDone + '/' + schedT + '个</div></div>';
+  kpiHtml += '<div class="kpi-card ' + (focusMin >= 120 ? "good" : focusMin >= 60 ? "ok" : focusMin > 0 ? "warn" : "low") + '"><div class="kpi-num">' + hrs(focusMin) + '</div><div class="kpi-unit">小时</div><div class="kpi-label">专注时长</div><div class="kpi-sub">' + pomoCnt + '次番茄钟</div></div>';
+  kpiHtml += '<div class="kpi-card ' + kpiT(habitRate) + '"><div class="kpi-ring">' + ringPct(habitRate, kpiC(habitRate)) + '<span class="kpi-val">' + habitRate + '%</span></div><div class="kpi-label">习惯达成率</div><div class="kpi-sub">' + habitDays + '/' + rangeLen + '天</div></div>';
+  safeWrite("#revSummary", kpiHtml);
+
+  /* ── 任务复盘 ── */
+  const taskBadge = $("#rvTaskBadge");
+  if (taskBadge) { taskBadge.textContent = "优秀"; taskBadge.className = "rv-panel-badge good"; }
+  let msHtml = '';
+  msHtml += '<div class="ms"><b>' + plannedN + '</b><span>计划任务</span></div>';
+  msHtml += '<div class="ms"><b>' + doneN + '</b><span>已完成</span></div>';
+  msHtml += '<div class="ms"><b>' + (plannedN - doneN - overdueCnt) + '</b><span>进行中</span></div>';
+  msHtml += '<div class="ms"><b>' + overdueCnt + '</b><span>已过期</span></div>';
+  safeWrite("#revTaskStats", msHtml);
+
+  /* 饼图 */
+  (function () {
+    const cv = $("#revTaskPie"); if (!cv) return;
+    const W = cv.width = cv.parentNode.clientWidth || 300; cv.height = 200;
+    const ctx = cv.getContext("2d"); if (!ctx) return;
+    ctx.clearRect(0, 0, W, 200);
+    const cx = W / 2 - 30, cy = 100, r = 70;
+    const slices = [{ v: doneN, label: "已完成", c: "#7FB89A" }, { v: plannedN - doneN - overdueCnt, label: "进行中", c: "#F59E0B" }, { v: overdueCnt, label: "已过期", c: "#E06070" }];
+    let start = 0;
+    slices.forEach(s => {
+      if (s.v <= 0) return;
+      const a = s.v / plannedN * Math.PI * 2;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, r, start - Math.PI / 2, start + a - Math.PI / 2);
+      ctx.fillStyle = s.c; ctx.fill();
+      start += a;
+    });
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.45, 0, Math.PI * 2); ctx.fillStyle = "var(--bg)"; ctx.fill();
+    ctx.font = "bold 18px system-ui"; ctx.fillStyle = "var(--ink)"; ctx.textAlign = "center";
+    ctx.fillText(rate + "%", cx, cy + 6);
+    let lx = W - 100, ly = 40;
+    slices.forEach(s => {
+      if (s.v <= 0) return;
+      ctx.fillStyle = s.c; ctx.fillRect(lx, ly - 4, 10, 10);
+      ctx.font = "11px system-ui"; ctx.fillStyle = "var(--ink-soft)"; ctx.textAlign = "left";
+      ctx.fillText(s.label + "(" + s.v + ")", lx + 14, ly + 5);
+      ly += 22;
+    });
+  })();
+
+  /* 任务分类列表 */
+  let tcHtml = ""; const maxV = Math.max(...Object.values(demoTypes));
+  Object.keys(demoTypes).forEach((k, i) => {
+    const v = demoTypes[k]; const pct = Math.round(v / maxV * 100);
+    tcHtml += '<div class="tc-row"><span class="tc-dot" style="background:' + typeColors[i] + '"></span><span class="tc-name">' + k + '</span><span class="tc-cnt">' + v + '</span><div class="tc-bar"><i style="width:' + pct + '%;background:' + typeColors[i] + '"></i></div></div>';
+  });
+  safeWrite("#revTaskClass", tcHtml);
+
+  /* 每日完成趋势图 */
+  (function () {
+    const cv = $("#revTaskTrend"); if (!cv) return;
+    const W = cv.width = cv.parentNode.clientWidth || 300; cv.height = 200;
+    const ctx = cv.getContext("2d"); if (!ctx) return;
+    ctx.clearRect(0, 0, W, 200);
+    const pad = { top: 20, right: 10, bottom: 30, left: 35 };
+    const w = W - pad.left - pad.right, h = 180 - pad.top - pad.bottom;
+    const vals = taskTrendVals;
+    /* 网格 */
+    ctx.strokeStyle = "var(--bg-soft)"; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) { const y = pad.top + h * i / 4; ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke(); }
+    const bw = Math.min(Math.floor(w / vals.length * 0.7), 20);
+    vals.forEach((v, i) => {
+      if (v === 0) return;
+      const x = pad.left + i * (w / vals.length) + ((w / vals.length) - bw) / 2;
+      const bh = v / 100 * h;
+      const c = v >= 80 ? "#7FB89A" : v >= 50 ? "#F59E0B" : "#E06070";
+      ctx.fillStyle = c; ctx.fillRect(x, pad.top + h - bh, bw, bh);
+      ctx.font = "10px system-ui"; ctx.fillStyle = "var(--ink-soft)"; ctx.textAlign = "center";
+      ctx.fillText(v + "%", x + bw / 2, pad.top + h - bh - 4);
+    });
+    ctx.font = "9px system-ui"; ctx.fillStyle = "var(--ink-soft)"; ctx.textAlign = "center";
+    const step = Math.max(1, Math.floor(vals.length / 8));
+    for (let i = 0; i < vals.length; i += step) { const x = pad.left + (i + 0.5) * (w / vals.length); ctx.fillText(dayLabels[i], x, pad.top + h + 18); }
+  })();
+
+  /* ── 专注复盘 ── */
+  const focusBadge = $("#rvFocusBadge");
+  if (focusBadge) { focusBadge.textContent = "专注达人"; focusBadge.className = "rv-panel-badge good"; }
+  let fmHtml = '';
+  fmHtml += '<div class="ms"><b>' + hrs(focusMin) + '</b><span>总专注(时)</span></div>';
+  fmHtml += '<div class="ms"><b>' + focusMin + '</b><span>总分钟</span></div>';
+  fmHtml += '<div class="ms"><b>' + pomoCnt + '</b><span>番茄钟次数</span></div>';
+  fmHtml += '<div class="ms"><b>' + avgMin + '</b><span>平均分钟/次</span></div>';
+  safeWrite("#revFocusStats", fmHtml);
+
+  /* 每日专注柱状图 */
+  (function () {
+    const cv = $("#revFocusBars"); if (!cv) return;
+    const W = cv.width = cv.parentNode.clientWidth || 300; cv.height = 220;
+    const ctx = cv.getContext("2d"); if (!ctx) return;
+    ctx.clearRect(0, 0, W, 220);
+    const pad = { top: 20, right: 10, bottom: 30, left: 30 };
+    const w = W - pad.left - pad.right, h = 190 - pad.top - pad.bottom;
+    const maxM = Math.max(25, Math.max(...dailyMin));
+    ctx.strokeStyle = "var(--bg-soft)"; ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 4; i++) { const y = pad.top + h * i / 4; ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke(); }
+    const bw = Math.min(Math.floor(w / dailyMin.length * 0.8), 30);
+    dailyMin.forEach((m, i) => {
+      if (m === 0) return;
+      const x = pad.left + i * (w / dailyMin.length) + ((w / dailyMin.length) - bw) / 2;
+      const bh = m / maxM * h;
+      ctx.fillStyle = "var(--accent)";
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, pad.top + h - bh, bw, bh, [3, 3, 0, 0]); ctx.fill(); }
+      else { ctx.fillRect(x, pad.top + h - bh, bw, bh); }
+      if (m >= 10) { ctx.font = "9px system-ui"; ctx.fillStyle = "var(--ink-soft)"; ctx.textAlign = "center"; ctx.fillText(m + "m", x + bw / 2, pad.top + h - bh - 3); }
+    });
+    ctx.font = "9px system-ui"; ctx.fillStyle = "var(--ink-soft)"; ctx.textAlign = "center";
+    const step = Math.max(1, Math.floor(dailyMin.length / 8));
+    for (let i = 0; i < dailyMin.length; i += step) { const x = pad.left + (i + 0.5) * (w / dailyMin.length); ctx.fillText(dayLabels[i], x, pad.top + h + 16); }
+  })();
+
+  /* 专注热力 */
+  if (dates.length <= 31) {
+    let heatHtml = "";
+    dailyMin.forEach((m, i) => {
+      const pct = m > 0 ? Math.min(100, Math.round(m / 120 * 100)) : 0;
+      heatHtml += '<div class="fh-day"><div class="fh-bar" style="height:' + (Math.max(4, pct / 2)) + 'px;opacity:' + (pct > 0 ? Math.max(.2, pct / 100) : '.08') + '"></div><div class="fh-label">' + (dayLabels[i] || "") + '</div>' + (m > 0 ? '<div class="fh-val">' + m + 'm</div>' : '') + '</div>';
+    });
+    safeWrite("#revFocusHeat", heatHtml);
+  }
+
+  /* ── 习惯打卡 ── */
+  const habitBadge = $("#rvHabitBadge");
+  if (habitBadge) { habitBadge.textContent = "极佳"; habitBadge.className = "rv-panel-badge good"; }
+  let hHtml = "";
+  demoHd.forEach(d => {
+    const color = d.rate >= 80 ? "var(--green)" : d.rate >= 50 ? "#F59E0B" : "var(--red)";
+    hHtml += '<div class="habit-row"><span style="font-size:18px;margin-right:4px">' + d.emoji + '</span><b style="flex:1">' + d.name + '</b><span style="font-size:11px;color:var(--ink-soft);margin-right:8px">' + d.c + '/' + rangeLen + '天</span><span style="font-size:13px;font-weight:600;color:' + color + ';min-width:40px">' + d.rate + '%</span></div>';
+    hHtml += '<div style="margin:0 24px 4px;height:3px;border-radius:2px;background:var(--bg-soft);overflow:hidden"><div style="height:100%;width:' + d.rate + '%;background:' + color + ';border-radius:2px;transition:width .8s"></div></div>';
+    if (d.streak > 0) hHtml += '<div style="margin:0 24px 6px;font-size:10px;color:var(--ink-soft)">🔥 连续' + d.streak + '天</div>';
+  });
+  safeWrite("#revHabitStats", hHtml);
+  let hbHtml = '<div class="hb-good">🏆 最佳习惯：' + demoHd[0].name + ' (' + demoHd[0].rate + '%)</div>';
+  hbHtml += '<div class="hb-low">💪 持续坚持：' + demoHd[2].name + ' (' + demoHd[2].rate + '%)</div>';
+  safeWrite("#revHabitBest", hbHtml);
+
+  /* ── 日程执行 ── */
+  const schedBadge = $("#rvSchedBadge");
+  if (schedBadge) { schedBadge.textContent = "不错"; schedBadge.className = "rv-panel-badge good"; }
+  let smHtml = '';
+  smHtml += '<div class="ms"><b>' + schedT + '</b><span>有日程任务</span></div>';
+  smHtml += '<div class="ms"><b>' + schedDone + '</b><span>按时完成</span></div>';
+  smHtml += '<div class="ms"><b>' + schedRate + '%</b><span>准时率</span></div>';
+  smHtml += '<div class="ms"><b>' + (schedT - schedDone) + '</b><span>未完成</span></div>';
+  safeWrite("#revSchedStats", smHtml);
+
+  /* 日程利用率柱状图 */
+  (function () {
+    const cv = $("#revUtil"); if (!cv) return;
+    cv.style.display = ""; cv.style.height = ""; cv.style.margin = ""; cv.style.padding = "";
+    const W = cv.width = cv.parentNode.clientWidth || 300; cv.height = 180;
+    const ctx = cv.getContext("2d"); if (!ctx) return;
+    ctx.clearRect(0, 0, W, 180);
+    const pad = { top: 20, right: 10, bottom: 30, left: 30 };
+    const w = W - pad.left - pad.right, h = 150 - pad.top - pad.bottom;
+    const maxV = Math.max(1, ...utilVals);
+    ctx.strokeStyle = "var(--bg-soft)"; ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 4; i++) { const y = pad.top + h * i / 4; ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke(); }
+    const bw = Math.min(Math.floor(w / utilVals.length * 0.8), 30);
+    utilVals.forEach((v, i) => {
+      const x = pad.left + i * (w / utilVals.length) + ((w / utilVals.length) - bw) / 2;
+      const bh = v / maxV * h;
+      ctx.fillStyle = "var(--accent)"; ctx.fillRect(x, pad.top + h - bh, bw, bh);
+      ctx.font = "10px system-ui"; ctx.fillStyle = "var(--ink-soft)"; ctx.textAlign = "center";
+      ctx.fillText(v, x + bw / 2, pad.top + h - bh - 4);
+    });
+    ctx.font = "9px system-ui"; ctx.fillStyle = "var(--ink-soft)"; ctx.textAlign = "center";
+    const step = Math.max(1, Math.floor(utilVals.length / 8));
+    for (let i = 0; i < utilVals.length; i += step) { const x = pad.left + (i + 0.5) * (w / utilVals.length); ctx.fillText(dayLabels[i], x, pad.top + h + 16); }
+    const legendEl = $("#revUtilLegend"); if (legendEl) legendEl.innerHTML = '<div class="legend-row"><span class="legend-swatch" style="background:var(--accent)"></span> 每日带日程任务数量（示例）</div>';
+  })();
+
+  /* ── AI 智能小结 ── */
+  let aiHtml = '<h3>🤖 智能复盘小结</h3><div class="ai-body">';
+  const lines = [];
+  lines.push('🎉 <span class="ai-highlight">任务完成率 ' + rate + '%</span>，表现优秀！');
+  if (focusMin > 0) lines.push('🍅 本周累计专注 <span class="ai-highlight">' + hrs(focusMin) + '小时</span>，' + pomoCnt + '次番茄钟。');
+  if (habitRate >= 70) lines.push('✅ 习惯达标率 ' + habitRate + '%，<span class="ai-highlight">自律力强劲</span>！');
+  if (overdueCnt > 0) lines.push('⚠️ 有 ' + overdueCnt + ' 个任务已过期，建议及时处理。');
+  lines.push('📈 相比上周期完成率提升 <span class="ai-highlight">+5%</span>！');
+  aiHtml += lines.map(l => '<div class="rev-ai-row">' + l + '</div>').join("");
+  aiHtml += '</div><div style="margin-top:8px;font-size:11px;color:var(--ink-soft);opacity:.7">📊 以上为示例数据，开始使用后自动替换为真实记录</div>';
+  safeWrite("#revAISummary", aiHtml);
+
+  /* 日历热力图 */
+  try { if (typeof renderRevCal === "function") renderRevCal(); } catch (e) { console.error("日历渲染失败", e); }
+}
+
+
 /* 复盘数据始终从 state 同源计算 → 与周视图/打卡/专注三方一致、跨模块数字一致 */
 function paintReview(dates,isDay,isYear){
   const hrs=m=>Math.round(m/6)/10;   /* 分钟→小时，统一四舍五入；概览与专注模块共用，保证数字一致 */
@@ -2537,166 +2979,225 @@ function paintReview(dates,isDay,isYear){
     console.error("[复盘] 数据计算降级（已用 0/[] 兜底）",e);
   }
 
-  /* v51：移除示例预览拦截——无数据时直接展示真实空状态文案，不再绕道示例预览 */
-  removeDemoBanner();
+  /* v53：完全对齐 review-guide.html 参考图 —— SVG环形KPI + Canvas图表 + 全维度面板 */
 
-  /* v49：奶油手帐简约风空状态——四模块独立文案，卡片温暖不空白 */
-  const safeWrite=(id,html)=>{const el=$(id);if(!el)return;try{el.innerHTML=html;}catch(e){console.error(`[复盘] ${id} 写入失败`,e);}};
-  const hideEl=s=>{const el=$(s);if(el)el.style.display="none";};
-  const showEl=s=>{const el=$(s);if(el)el.style.display="";};
-  const emptyCard=txt=>`<div class="rev-empty rev-empty-center">${txt}</div>`;
-  /* v49：彻底收起空态下方的 canvas/legend，撑开整个面板高度 */
-  const collapseCanvas=id=>{const el=$(id);if(el){el.style.display="none";el.style.height="0";el.style.margin="0";el.style.padding="0";}};
+  // ---------- 基础辅助 ----------
+  try{ removeDemoBanner(); }catch(e){}
+  const sw=(id,html)=>{const el=$(id);if(!el)return;try{el.innerHTML=html;}catch(e){console.error("[复盘] "+id, e);}};
+  const se=(s,v)=>{const el=$(s);if(el)el.style.display=v?"":"none";};
+  const ec=txt=>'<div class="rev-empty rev-empty-center">'+txt+'</div>';
+  const ET="该周期暂无记录✨";
 
+  const total=planned.length===0 && recs.length===0 && hd.length===0 && schedT.length===0;
+
+  // ---------- 辅助：SVG环形图 ----------
+  const ringSvg=(pct,cls)=>{const c=Math.max(0,Math.min(100,pct||0));const C=2*Math.PI*28;const o=C*(1-c/100);return'<svg viewBox="0 0 72 72" class="kpi-svg"><circle cx="36" cy="36" r="28" fill="none" stroke="var(--line)" stroke-width="6"/><circle cx="36" cy="36" r="28" fill="none" stroke="var(--c,'+cls+')" stroke-width="6" stroke-dasharray="'+C+'" stroke-dashoffset="'+o+'" stroke-linecap="round" transform="rotate(-90 36 36)" class="kpi-arc '+cls+'"/></svg>';};
+  const kpiColor=p=>p>=70?'var(--green)':p>=40?'var(--accent)':'var(--red)';
+  const kpiCls=p=>p>=70?'good':p>=40?'mid':'low';
+
+  // ---------- 始终显示所有面板 ----------
+  try{se("#revEmptyGuide",false);["#rvTaskPanel","#rvFocusPanel","#rvHabitPanel","#rvSchedPanel"].forEach(p=>se(p,true));se("#revAISummary",true);se("#revCal",true);}catch(e){}
+
+  // ---------- ① KPI 大盘：SVG环形图 ----------
   try{
-  /* ── 第一层：总体概览（4核心KPI + 附加统计） ── */
-  const summaryEmpty=planned.length===0 && recs.length===0 && habitDays===0 && schedT.length===0;
-  if(summaryEmpty){
-    safeWrite("#revSummary",emptyCard("📋 当前周期暂无任务、日程、专注的数据记录"));
-    safeWrite("#revExtraStats","");
-  }else{
-    const rateTag=rate>=90?"优秀":rate>=70?"良好":rate>=50?"一般":"待提升";
-    const rateCls=rate>=90?"kpi-good":rate>=70?"kpi-ok":rate>=50?"kpi-mid":"kpi-low";
-    safeWrite("#revSummary",
-      `<div class="scard"><b>${rate}%</b><span>任务完成率</span><i class="kpi-tag ${rateCls}">${rateTag}${trend}</i></div>`+
-      `<div class="scard"><b>${schedRate}%</b><span>日程达标率</span></div>`+
-      `<div class="scard"><b>${hrs(focusMin)}</b><span>总专注时长(h)</span></div>`+
-      `<div class="scard"><b>${habitRate}%</b><span>习惯达成率</span></div>`);
-    const newCnt=tasks.filter(t=>{if(!t.createdAt)return false;try{return inRange(fmtDate(new Date(t.createdAt)));}catch(e){return false;}}).length;
-    const abandonCnt=tasks.filter(t=>t.abandoned&&inRange(t.due)).length;
-    safeWrite("#revExtraStats",
-      `<span>📝 新建 ${newCnt}</span><span>✅ 完成 ${doneT.length}</span><span>⚠️ 逾期 ${overdueCnt}</span><span>❌ 放弃 ${abandonCnt}</span>`);
-  }
-  }catch(e){console.error("概览渲染失败",e);}
+    let h='';
+    h+='<div class="kpi-card '+kpiCls(rate)+'"><div class="kpi-ring">'+ringSvg(rate,kpiCls(rate))+'<span class="kpi-val">'+rate+'%</span></div><div class="kpi-label">任务完成率</div><div class="kpi-sub">'+doneT.length+'/'+planned.length+' 任务</div></div>';
+    h+='<div class="kpi-card '+kpiCls(schedRate)+'"><div class="kpi-ring">'+ringSvg(schedRate,kpiCls(schedRate))+'<span class="kpi-val">'+schedRate+'%</span></div><div class="kpi-label">日程执行率</div><div class="kpi-sub">'+schedDone.length+'/'+schedT.length+' 日程</div></div>';
+    h+='<div class="kpi-card '+(focusMin>=120?"good":focusMin>=60?"mid":"low")+'"><div class="kpi-ring kpi-ring-num"><svg viewBox="0 0 72 72" class="kpi-svg"><circle cx="36" cy="36" r="28" fill="none" stroke="var(--line)" stroke-width="6"/></svg><span class="kpi-val kpi-val-big">'+(focusMin>=60?Math.round(focusMin/6)/10+'h':Math.round(focusMin)+'m')+'</span></div><div class="kpi-label">专注时长</div><div class="kpi-sub">'+pomoCnt+' 次记录</div></div>';
+    h+='<div class="kpi-card '+kpiCls(habitRate)+'"><div class="kpi-ring">'+ringSvg(habitRate,kpiCls(habitRate))+'<span class="kpi-val">'+habitRate+'%</span></div><div class="kpi-label">习惯达成率</div><div class="kpi-sub">'+habitDays+'/'+rangeLen+' 天打卡</div></div>';
+    sw("#revSummary",h);
+  }catch(e){console.error("[复盘] KPI失败",e);sw("#revSummary",ec("KPI渲染异常"));}
+
+  // 日统计（7/14天完成趋势）
+  const dailyDone=dates.map(ds=>planned.filter(t=>t.done&&t.due===ds).length);
+  const dailyPlan=dates.map(ds=>planned.filter(t=>t.due===ds).length);
+  const taskDayLabels=isYear?dates.map(m=>+m.slice(5)+"月"):dates.map(ds=>isDay?ds.slice(5).replace("-","/"):+ds.slice(8));
+
+  // ---------- ② 任务复盘 ----------
   try{
-  /* ── 模块一：任务清单复盘 ── */
-  const taskEmpty=planned.length===0;
-  if(taskEmpty){
-    safeWrite("#revTaskStats",emptyCard("📋 本周期暂无任务记录，创建任务后即可看见数据"));
-    safeWrite("#revTaskClass","");
-    safeWrite("#revQuadrantLegend","");
-    safeWrite("#revTaskTrendLegend","");
-    collapseCanvas("#revQuadrant");collapseCanvas("#revTaskTrend");
-  }else{
-    /* 分类统计：按清单分组，高亮最高效/最拖延 */
-    const listStats=lists.map(l=>{
-      const lt=planned.filter(t=>t.listId===l.id);
-      const dn=lt.filter(t=>t.done).length;
-      return {l,total:lt.length,done:dn,rate:lt.length?Math.round(dn/lt.length*100):0};
-    }).filter(s=>s.total>0).sort((a,b)=>b.rate-a.rate);
-    /* 无清单归属的任务归入「未分类」 */
-    const noList=planned.filter(t=>!t.listId||!lists.some(l=>l.id===t.listId));
-    if(noList.length){
-      const dn=noList.filter(t=>t.done).length;
-      listStats.push({l:{emoji:"📥",name:"未分类",color:"#999"},total:noList.length,done:dn,rate:Math.round(dn/noList.length*100)});
-    }
-    const best=listStats[0],worst=listStats[listStats.length-1];
-    safeWrite("#revTaskStats",
-      `<div class="ms"><b>${planned.length}</b><span>有效任务</span></div>`+
-      `<div class="ms"><b>${doneT.length}</b><span>已完成</span></div>`+
-      `<div class="ms"><b>${planned.length-doneT.length}</b><span>未完成</span></div>`+
-      `<div class="ms"><b>${rate}%</b><span>完成率</span></div>`);
-    safeWrite("#revTaskClass",
-      (best?`<div class="rev-class-hi">🏆 最高效：${esc(best.l.emoji||"")} ${esc(best.l.name)} ${best.rate}%</div>`:"")+
-      (worst&&worst!==best?`<div class="rev-class-lo">🐌 待提升：${esc(worst.l.emoji||"")} ${esc(worst.l.name)} ${worst.rate}%</div>`:"")+
-      listStats.map(s=>`<div class="rev-class-row"><span class="dot" style="background:${s.l.color||"#ccc"}"></span><b>${esc((s.l.emoji||"")+" "+s.l.name)}</b><span class="rc-rate">${s.done}/${s.total} · ${s.rate}%</span></div>`).join(""));
-    /* 四象限分布饼图：P0-P3 */
-    const quad=[0,0,0,0];
-    planned.forEach(t=>{const p=t.pri!==undefined&&t.pri!==null&&t.pri!==""?+t.pri:99;if(p>=0&&p<4)quad[p]++;});
-    const quadTotal=quad.reduce((s,v)=>s+v,0);
-    const quadData=[
-      {label:"P0 重要紧急",value:quad[0],color:"#C77B6E"},
-      {label:"P1 重要不紧急",value:quad[1],color:"#D99A5B"},
-      {label:"P2 紧急不重要",value:quad[2],color:"#E0C05C"},
-      {label:"P3 不重要不紧急",value:quad[3],color:"#7FB89A"},
-    ].filter(d=>d.value>0);
-    if(quadTotal>0&&quadData.length>0){
-      showEl("#revQuadrant");
-      safeDraw(()=>drawDonut($("#revQuadrant"),quadData));
-      safeWrite("#revQuadrantLegend",quadData.map(d=>`<span><i class="d" style="background:${d.color}"></i>${d.label} ${d.value}</span>`).join(""));
+    se("#rvTaskPanel",true);
+    // 面板标题徽章
+    try{const badge=$("#rvTaskBadge");if(badge){badge.textContent=rate>=80?"优秀":rate>=60?"良好":rate>0?"加油":"待开始";badge.className="rv-panel-badge "+kpiCls(rate);}}catch(e){}
+
+    if(!total && planned.length>0){
+      let html='<div class="rv-mini-grid">';
+      html+='<div class="ms"><b>'+planned.length+'</b><span>计划数</span></div>';
+      html+='<div class="ms"><b>'+doneT.length+'</b><span>已完成</span></div>';
+      html+='<div class="ms"><b>'+(planned.length-doneT.length)+'</b><span>未完成</span></div>';
+      if(autoNew>0)html+='<div class="ms"><b>'+autoNew+'</b><span>新增</span></div>';
+      html+='</div>';
+      sw("#revTaskStats",html);
+
+      // 饼图：完成/未完成 分布
+      try{
+        const pie=$("#revTaskPie");if(pie){se("#revTaskPie",true);
+          const {ctx,w,h}=prepCv(pie);
+          const cx=w/2,cy=h*0.4,R=Math.min(w,h)/2-20;
+          const total=planned.length;
+          ctx.clearRect(0,0,w,h);
+          if(total>0){
+            const slices=[
+              {v:doneT.length,c:getComputedStyle(document.body).getPropertyValue("--green").trim()||"#84c3b7",l:"已完成"},
+              {v:total-doneT.length,c:"#E5DFD7",l:"未完成"}
+            ];
+            let a=-Math.PI/2;
+            slices.forEach(s=>{
+              const ang=s.v/total*2*Math.PI;
+              ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,R,a,a+ang);ctx.closePath();
+              ctx.fillStyle=s.c;ctx.fill();
+              ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();
+              a+=ang;
+            });
+            // 圆心文字
+            ctx.fillStyle="#1C1C1E";ctx.font="600 22px sans-serif";ctx.textAlign="center";
+            ctx.fillText(rate+"%",cx,cy+6);
+            ctx.fillStyle="#8E8E93";ctx.font="11px sans-serif";
+            ctx.fillText("完成率",cx,cy+22);
+            // 图例
+            ctx.textAlign="left";
+            ctx.fillStyle=slices[0].c;ctx.fillRect(10,h-24,10,10);ctx.fillStyle="#1C1C1E";ctx.font="11px sans-serif";ctx.fillText("已完成 "+doneT.length,24,h-15);
+            ctx.fillStyle=slices[1].c;ctx.fillRect(10,h-10,10,10);ctx.fillText("未完成 "+(total-doneT.length),24,h-1);
+          }
+        }
+      }catch(e){console.error("[复盘] 饼图失败",e);}
+
+      // 折线图：每日完成趋势
+      try{
+        const ln=$("#revTaskTrend");if(ln){se("#revTaskTrend",true);
+          drawLine(ln,taskDayLabels,dailyDone,dailyPlan);
+        }
+      }catch(e){console.error("[复盘] 趋势图失败",e);}
+
+      // 任务分类列表（按清单/标签分组）
+      try{
+        const classMap={};planned.forEach(t=>{const lid=t.listId||"_none";const l=lists.find(x=>x.id===lid);const key=l?l.name:"未分类";if(!classMap[key])classMap[key]={name:key,color:l?l.color:"#B5B0A9",cnt:0};classMap[key].cnt++;});
+        const classList=Object.values(classMap).sort((a,b)=>b.cnt-a.cnt);
+        if(classList.length>0){
+          let cl='<div class="rv-chart-title" style="margin-top:4px">任务分类分布</div>';
+          cl+=classList.map(c=>'<div class="tc-row"><span class="tc-dot" style="background:'+c.color+'"></span><span class="tc-name">'+esc(c.name)+'</span><span class="tc-cnt">'+c.cnt+'项</span><div class="tc-bar"><i style="width:'+Math.round(c.cnt/planned.length*100)+'%;background:'+c.color+'"></i></div></div>').join('');
+          sw("#revTaskClass",cl);
+        }else{sw("#revTaskClass","");}
+      }catch(e){console.error("[复盘] 任务分类失败",e);}
     }else{
-      collapseCanvas("#revQuadrant");
-      safeWrite("#revQuadrantLegend","<span>暂无优先级标记</span>");
+      sw("#revTaskStats",ec(ET));se("#revTaskPie",false);se("#revTaskTrend",false);sw("#revTaskClass","");
     }
-    /* 任务状态趋势折线：周=7日/月=30日/年=12月 */
-    const taskTrend=dates.map(k=>tasks.filter(t=>t.done&&(isYear?t.due.slice(0,7)===k:t.due===k)).length);
-    showEl("#revTaskTrend");
-    safeDraw(()=>drawLine($("#revTaskTrend"),dayLabels,taskTrend,taskTrend.map(()=>0)));
-    safeWrite("#revTaskTrendLegend",`<span>每日完成任务趋势</span>`);
-  }
-  }catch(e){console.error("任务复盘渲染失败",e);}
-  try{
-  /* ── 模块二：日程执行复盘 ── */
-  const schedEmpty=schedT.length===0;
-  if(schedEmpty){
-    safeWrite("#revSchedStats",emptyCard("🗓 本周期暂无排程 & 完成日程，排计划后即可看见数据"));
-    safeWrite("#revUtilLegend","");
-    safeWrite("#revCrossWeek","");
-    collapseCanvas("#revUtil");
-  }else{
-    safeWrite("#revSchedStats",
-      `<div class="ms"><b>${liftTotal}</b><span>排程任务</span></div>`+
-      `<div class="ms"><b>${liftDone}</b><span>已完成</span></div>`+
-      `<div class="ms"><b>${liftUndone}</b><span>未完成</span></div>`+
-      `<div class="ms"><b>${autoNew}</b><span>当日新建排程</span></div>`);
-    showEl("#revUtil");
-    safeDraw(()=>drawBars($("#revUtil"),dayLabels,utilVals,"#9B8EC9"));
-    safeWrite("#revUtilLegend",`<span>每日排程任务数（时间利用率）</span>`);
-    /* 跨周调整统计：延期/跨周修改的任务数量 */
-    let crossCnt=0;
-    try{crossCnt=planned.filter(t=>t.due&&t.createdAt&&fmtDate(new Date(t.createdAt))!==t.due).length;}catch(e){}
-    safeWrite("#revCrossWeek",crossCnt>0?`<div class="rev-cw">🔄 跨周调整/延期任务 ${crossCnt} 项 · 规划稳定性 ${100-Math.round(crossCnt/planned.length*100)}%</div>`:"");
-  }
-  }catch(e){console.error("日程复盘渲染失败",e);}
-  try{
-  /* ── 模块三：番茄专注复盘 ── */
-  const focusEmpty=recs.length===0;
-  if(focusEmpty){
-    safeWrite("#revFocusStats",emptyCard("🍅 还没有专注计时记录，开始番茄专注就会产生复盘数据"));
-    safeWrite("#revFocusHeatLegend","");
-    safeWrite("#revFocusTrendLegend","");
-    collapseCanvas("#revFocusHeat");collapseCanvas("#revFocusTrend");
-  }else{
-    const peakIdx=wk.indexOf(Math.max(...wk));
-    const peakDay=["周一","周二","周三","周四","周五","周六","周日"][peakIdx];
-    safeWrite("#revFocusStats",
-      `<div class="ms"><b>${hrs(focusMin)}</b><span>总专注(h)</span></div>`+
-      `<div class="ms"><b>${pomoCnt}</b><span>有效番茄</span></div>`+
-      `<div class="ms"><b>${avgMin}</b><span>平均单次(分)</span></div>`+
-      `<div class="ms"><b>${peakDay}</b><span>黄金时段</span></div>`);
-    showEl("#revFocusHeat");showEl("#revFocusTrend");
-    safeDraw(()=>drawBars($("#revFocusHeat"),["一","二","三","四","五","六","日"],wk.map(m=>hrs(m)),"#6F9FD6"));
-    safeWrite("#revFocusHeatLegend",`<span>各星期专注时长(h) · 黄金时段一目了然</span>`);
-    safeDraw(()=>drawLine($("#revFocusTrend"),dayLabels,focusTrend,focusTrend.map(()=>0)));
-    safeWrite("#revFocusTrendLegend",`<span>专注时长波动趋势(h)</span>`);
-  }
-  }catch(e){console.error("专注复盘渲染失败",e);}
-  try{
-  /* ── 模块四：习惯打卡复盘 ── */
-  const habitHasData=hd.some(o=>o.c>0);
-  if(!habitHasData){
-    safeWrite("#revHabitStats",emptyCard("✨ 本周还没有打卡记录，完成打卡后这里会生成统计"));
-    safeWrite("#revHabitBest","");
-    const calBox=$("#revCal");if(calBox)calBox.innerHTML="";
-  }else{
-    safeWrite("#revHabitStats", hd.length?hd.map(o=>{
-      const breaks=Math.max(0,rangeLen-o.c);
-      return `<div class="habit-row"><span class="dot" style="background:${o.h.color}"></span><b>${esc(o.h.emoji+" "+o.h.name)}</b><span class="hr">连续${o.streak}天 · 中断${breaks}次 · 完成率${o.rate}%</span></div>`;
-    }).join(""):"<span>暂无习惯</span>");
-    const bestH=hd.reduce((a,b)=>b.rate>a.rate?b:a,hd[0]);
-    const weakH=hd.reduce((a,b)=>b.rate<a.rate?b:a,hd[0]);
-    safeWrite("#revHabitBest",
-      (bestH&&bestH.rate>0?`<div class="rev-hb-good">🏆 最优习惯：${esc(bestH.h.emoji+" "+bestH.h.name)} · 连续${bestH.streak}天</div>`:"")+
-      (weakH&&weakH!==bestH&&weakH.rate<100?`<div class="rev-hb-low">🌱 待优化：${esc(weakH.h.emoji+" "+weakH.h.name)} · 完成率仅${weakH.rate}%</div>`:""));
-  }
-  }catch(e){console.error("习惯复盘渲染失败",e);}
+  }catch(e){console.error("[复盘] 任务面板失败",e);sw("#revTaskStats",ec("渲染异常"));}
 
-  /* ── 底部：智能复盘小结（3行极简总结） ── */
-  const revCtx={planned,doneT,rate,schedRate,schedDone:liftDone,schedTotal:liftTotal,
-    focusMin,pomoCnt,avgMin,habitRate,habitDays,overdueCnt,prevRate,hd:hd||[],wk,dates,isYear,isDay,lists,tasks};
-  try{buildAISummary(revCtx);}catch(e){console.error("AI小结渲染失败",e);}
-  try{renderRevCal();}catch(e){console.error("日历渲染失败",e);}
-}
+  // ---------- ③ 专注复盘 ----------
+  try{
+    se("#rvFocusPanel",true);
+    try{const badge=$("#rvFocusBadge");if(badge){badge.textContent=pomoCnt>=10?"高效":pomoCnt>=3?"不错":pomoCnt>0?"继续":"待开始";badge.className="rv-panel-badge "+(focusMin>=120?"good":focusMin>=60?"mid":"low");}}catch(e){}
+    if(!total && recs.length>0){
+      const focusDays=[...new Set(recs.map(r=>r.date).filter(Boolean))].length;
+      let html='<div class="rv-mini-grid">';
+      html+='<div class="ms"><b>'+Math.round(focusMin/6)/10+'</b><span>总时长(h)</span></div>';
+      html+='<div class="ms"><b>'+pomoCnt+'</b><span>番茄数</span></div>';
+      html+='<div class="ms"><b>'+avgMin+'</b><span>平均(min)</span></div>';
+      html+='<div class="ms"><b>'+focusDays+'</b><span>专注天数</span></div>';
+      html+='</div>';
+      sw("#revFocusStats",html);
+
+      // 柱状图：每日专注时长
+      try{
+        const fBar=$("#revFocusBars");if(fBar){se("#revFocusBars",true);
+          const dailyFocus=dates.map(ds=>recs.filter(r=>r.date===ds||(isYear&&String(r.date||"").slice(0,7)===ds)).reduce((s,r)=>s+(+(r&&r.minutes)||0),0));
+          drawBars(fBar,taskDayLabels,dailyFocus,"#6F9FD6");
+        }
+      }catch(e){console.error("[复盘] 专注柱状图失败",e);}
+
+      // 热点图：周一~周日
+      try{
+        const heat=$("#revFocusHeat");if(heat){
+          heat.innerHTML='';
+          const dayNames=["一","二","三","四","五","六","日"];
+          const maxWk=Math.max(...wk,1);
+          dayNames.forEach((n,i)=>{
+            const d=document.createElement("div");d.className="fh-day";
+            d.innerHTML='<div class="fh-bar" style="height:'+Math.max(4,Math.round(wk[i]/maxWk*60))+'px;background:#6F9FD6"></div><div class="fh-val">'+(wk[i]>=60?Math.round(wk[i]/6)/10+'h':wk[i]+'m')+'</div><div class="fh-label">'+n+'</div>';
+            heat.appendChild(d);
+          });
+        }
+      }catch(e){console.error("[复盘] 专注热力图失败",e);}
+    }else{
+      sw("#revFocusStats",ec(ET));se("#revFocusBars",false);try{$("#revFocusHeat").innerHTML='';}catch(e){}
+    }
+  }catch(e){console.error("[复盘] 专注面板失败",e);sw("#revFocusStats",ec("渲染异常"));}
+
+  // ---------- ④ 习惯打卡 ----------
+  try{
+    se("#rvHabitPanel",true);
+    try{const badge=$("#rvHabitBadge");if(badge){badge.textContent=habitRate>=80?"超棒":habitRate>=50?"良好":habitRate>0?"坚持":"待开始";badge.className="rv-panel-badge "+kpiCls(habitRate);}}catch(e){}
+    if(!total && hd.length>0){
+      let html='<div class="rv-habit-rows">';
+      html+=hd.map(item=>{
+        const name=item.h&&item.h.name?esc(item.h.name):"习惯";
+        const emoji=item.h&&item.h.emoji?item.h.emoji:"✅";
+        const color=item.h&&item.h.color?item.h.color:(kpiColor(item.rate||0));
+        const r=item.rate||0;
+        const barColor=kpiColor(r);
+        return '<div class="habit-row">'
+          +'<span class="dot" style="background:'+color+'"></span>'
+          +'<b>'+emoji+' '+name+'</b>'
+          +'<span class="hr">连续'+(item.streak||0)+'天 · 完成率'+r+'%</span>'
+          +'</div>';
+      }).join('');
+      html+='</div>';
+      sw("#revHabitStats",html);
+    }else{sw("#revHabitStats",ec(ET));}
+    try{$("#revHabitBest").innerHTML='';}catch(e){}
+    // 日历热力图
+    try{renderRevCal();}catch(e){console.error("[复盘] 日历失败",e);}
+  }catch(e){console.error("[复盘] 习惯面板失败",e);sw("#revHabitStats",ec("渲染异常"));}
+
+  // ---------- ⑤ 日程执行 ----------
+  try{
+    se("#rvSchedPanel",true);
+    try{const badge=$("#rvSchedBadge");if(badge){badge.textContent=schedRate>=80?"优秀":schedRate>=60?"良好":schedRate>0?"加油":"待开始";badge.className="rv-panel-badge "+kpiCls(schedRate);}}catch(e){}
+    if(!total && schedT.length>0){
+      let html='<div class="rv-mini-grid">';
+      html+='<div class="ms"><b>'+schedT.length+'</b><span>计划日程</span></div>';
+      html+='<div class="ms"><b>'+schedDone.length+'</b><span>已完成</span></div>';
+      html+='<div class="ms"><b>'+liftUndone+'</b><span>未完成</span></div>';
+      html+='</div>';
+      sw("#revSchedStats",html);
+
+      // 柱状图：每日日程数量
+      try{
+        const sc=$("#revUtil");if(sc){se("#revUtil",true);
+          drawBars(sc,taskDayLabels,utilVals,"#9B8EC9");
+        }
+      }catch(e){console.error("[复盘] 日程柱状图失败",e);}
+      try{sw("#revUtilLegend",'<span>每日带日程任务数</span>');}catch(e){}
+    }else{
+      sw("#revSchedStats",ec(ET));se("#revUtil",false);try{$("#revUtilLegend").innerHTML='';}catch(e){}
+    }
+  }catch(e){console.error("[复盘] 日程面板失败",e);sw("#revSchedStats",ec("渲染异常"));}
+
+  // ---------- ⑥ AI 智能小结 ----------
+  try{
+    if(!total){
+      const lines=[];
+      if(rate>0)lines.push({t:'📊 任务完成率 <b>'+rate+'%</b>（'+doneT.length+'/'+planned.length+'），共 '+planned.length+' 项任务',s:rate>=70?'good':''});
+      if(schedRate>0)lines.push({t:'🗓️ 日程执行率 <b>'+schedRate+'%</b>，'+schedT.length+' 条日程，'+liftUndone+' 条待完成',s:schedRate>=70?'good':''});
+      if(focusMin>0)lines.push({t:'🍅 累计专注 <b>'+Math.round(focusMin/6)/10+' 小时</b>，日均 '+(Math.round(focusMin/rangeLen))+' 分钟',s:focusMin>=120?'good':''});
+      if(habitRate>0)lines.push({t:'✅ 习惯打卡达成率 <b>'+habitRate+'%</b>，'+habitDays+'/'+rangeLen+' 天有打卡记录',s:habitRate>=70?'good':''});
+      if(trend)lines.push({t:'📈 趋势对比：'+trend,s:''});
+      if(overdueCnt>0)lines.push({t:'⚠️ 逾期任务 <b>'+overdueCnt+'</b> 项，建议及时处理',s:'warn'});
+      if(lines.length===0)lines.push({t:'📝 暂无足够数据生成智能复盘，开始记录就会分析啦 ✨',s:''});
+
+      let ai='<div class="rv-panel-hd"><h3>🤖 AI 智能小结</h3></div><div class="rv-panel-body">';
+      ai+='<div class="ai-body">'+lines.map(l=>'<div class="pp'+(l.s?' '+l.s:'')+'">'+l.t+'</div>').join('')+'</div>';
+      ai+='</div>';
+      sw("#revAISummary",ai);
+    }else{
+      sw("#revAISummary",'<div class="rv-panel-hd"><h3>🤖 AI 智能小结</h3></div><div class="rv-panel-body"><div class="ai-body"><div class="pp">📝 暂无足够数据，开始记录行动后，AI 会为你生成详细复盘分析 ✨</div></div></div>');
+    }
+  }catch(e){console.error("[复盘] AI小结失败",e);}
+
+  // 示例数据入口（数据为空时显示）
+  if(total && !state.revDemoDismissed){try{paintReviewDemo(dates,isDay,isYear);}catch(e){console.error("[复盘] 示例失败",e);}}
+
+}  /* end paintReview */
 /* v45：示例复盘预览 —— 该周期无任何成果数据时，渲染一套完整可视化（图表+统计+夸夸），
    让用户立刻看到复盘全貌。参考 Forest/滴答清单/小日常：新用户首次进统计页即看到示例。 */
 function paintReviewDemo(dates,isDay,isYear){
@@ -2750,41 +3251,46 @@ function paintReviewDemo(dates,isDay,isYear){
   const safeWrite=(id,html)=>{const el=$(id);if(!el)return;try{el.innerHTML=html;}catch(e){}};
   const showEl=s=>{const el=$(s);if(el)el.style.display="";};
 
-  /* 概览 */
+  /* 概览 — 对齐参考图 KPI SVG环形 */
+  const ringSvg=(pct,cls)=>{const c=Math.max(0,Math.min(100,pct||0));const C=2*Math.PI*28;const o=C*(1-c/100);return'<svg viewBox="0 0 72 72" class="kpi-svg"><circle cx="36" cy="36" r="28" fill="none" stroke="var(--line)" stroke-width="6"/><circle cx="36" cy="36" r="28" fill="none" stroke="var(--c,'+cls+')" stroke-width="6" stroke-dasharray="'+C+'" stroke-dashoffset="'+o+'" stroke-linecap="round" transform="rotate(-90 36 36)" class="kpi-arc '+cls+'"/></svg>';};
+  const kCls=p=>p>=70?'good':p>=40?'mid':'low';
   safeWrite("#revSummary",
-    `<div class="scard"><b>${rate}%</b><span>任务完成率 🎯 ↑5%</span></div>`+
-    `<div class="scard"><b>${schedRate}%</b><span>日程达标率 🗓️</span></div>`+
-    `<div class="scard"><b>${hrs(focusMin)}</b><span>专注小时 ⏱️</span></div>`+
-    `<div class="scard"><b>${habitRate}%</b><span>习惯达成率 📅</span></div>`+
-    `<div class="scard"><b>${plannedN}</b><span>有效任务 📋</span></div>`+
-    `<div class="scard"><b>${overdueCnt}</b><span>逾期任务 ⚠️</span></div>`);
+    '<div class="kpi-card '+kCls(rate)+'"><div class="kpi-ring">'+ringSvg(rate,kCls(rate))+'<span class="kpi-val">'+rate+'%</span></div><div class="kpi-label">任务完成率</div><div class="kpi-sub">'+doneN+'/'+plannedN+' 任务</div></div>'+
+    '<div class="kpi-card '+kCls(schedRate)+'"><div class="kpi-ring">'+ringSvg(schedRate,kCls(schedRate))+'<span class="kpi-val">'+schedRate+'%</span></div><div class="kpi-label">日程执行率</div><div class="kpi-sub">'+schedDone+'/'+schedT+' 日程</div></div>'+
+    '<div class="kpi-card '+(focusMin>=120?'good':focusMin>=60?'mid':'low')+'"><div class="kpi-ring kpi-ring-num"><svg viewBox="0 0 72 72" class="kpi-svg"><circle cx="36" cy="36" r="28" fill="none" stroke="var(--line)" stroke-width="6"/></svg><span class="kpi-val kpi-val-big">'+hrs(focusMin)+'h</span></div><div class="kpi-label">专注时长</div><div class="kpi-sub">'+pomoCnt+' 次记录</div></div>'+
+    '<div class="kpi-card '+kCls(habitRate)+'"><div class="kpi-ring">'+ringSvg(habitRate,kCls(habitRate))+'<span class="kpi-val">'+habitRate+'%</span></div><div class="kpi-label">习惯达成率</div><div class="kpi-sub">'+habitDays+'/'+rangeLen+' 天</div></div>');
+  /* 任务面板 */
+  safeWrite("#revTaskStats",
+    '<div class="ms"><b>'+plannedN+'</b><span>计划数</span></div>'+
+    '<div class="ms"><b>'+doneN+'</b><span>已完成</span></div>'+
+    '<div class="ms"><b>'+(plannedN-doneN)+'</b><span>未完成</span></div>'+
+    '<div class="ms"><b>'+autoNew+'</b><span>新增</span></div>');
+  showEl("#rvTaskPanel");showEl("#revTaskPie");showEl("#revTaskTrend");
+  try{const pie=$("#revTaskPie");if(pie){const {ctx,w,h}=prepCv(pie);ctx.clearRect(0,0,w,h);const cx=w/2,cy=h*0.4,R=Math.min(w,h)/2-20;ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,R,-Math.PI/2,-Math.PI/2+doneN/plannedN*2*Math.PI);ctx.closePath();ctx.fillStyle='#84c3b7';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,R,-Math.PI/2+doneN/plannedN*2*Math.PI,-Math.PI/2+2*Math.PI);ctx.closePath();ctx.fillStyle='#E5DFD7';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle='#1C1C1E';ctx.font='600 22px sans-serif';ctx.textAlign='center';ctx.fillText(rate+'%',cx,cy+6);ctx.fillStyle='#8E8E93';ctx.font='11px sans-serif';ctx.fillText('完成率',cx,cy+22);}}catch(e){}
+  try{const ln=$("#revTaskTrend");if(ln){const dailyDone=dates.map((_,i)=>isYear?(doneN/12|0)*(1+Math.round(Math.sin(i/2)*0.3)):plannedN/rangeLen*(0.6+Math.random()*0.4));drawLine(ln,dayLabels,dailyDone.map(v=>Math.round(v)),dates.map((_,i)=>Math.round(dailyDone[i]*1.3)));}}catch(e){}
+  /* 任务分类 */
+  safeWrite("#revTaskClass",'<div class="tc-row"><span class="tc-dot" style="background:#84c3b7"></span><span class="tc-name">示例任务</span><span class="tc-cnt">'+plannedN+'项</span><div class="tc-bar"><i style="width:100%;background:#84c3b7"></i></div></div>');
   /* 日程执行 */
   safeWrite("#revSchedStats",
-    `<div class="ms"><b>${liftTotal}</b><span>排程任务</span></div>`+
-    `<div class="ms"><b>${liftDone}</b><span>已完成</span></div>`+
-    `<div class="ms"><b>${liftUndone}</b><span>未完成</span></div>`+
-    `<div class="ms"><b>${autoNew}</b><span>当日新建排程</span></div>`);
+    '<div class="ms"><b>'+liftTotal+'</b><span>计划日程</span></div>'+
+    '<div class="ms"><b>'+liftDone+'</b><span>已完成</span></div>'+
+    '<div class="ms"><b>'+liftUndone+'</b><span>未完成</span></div>');
   showEl("#revUtil");
-  safeDraw(()=>drawBars($("#revUtil"),dayLabels,utilVals,"#9B8EC9"));
-  safeWrite("#revUtilLegend",`<span>每日排程任务数（时间利用率）</span>`);
+  try{drawBars($("#revUtil"),dayLabels,utilVals,"#9B8EC9");}catch(e){}
+  safeWrite("#revUtilLegend",'<span>每日带日程任务数</span>');
   /* 番茄专注 */
   safeWrite("#revFocusStats",
-    `<div class="ms"><b>${hrs(focusMin)}</b><span>总专注(h)</span></div>`+
-    `<div class="ms"><b>${pomoCnt}</b><span>有效番茄</span></div>`+
-    `<div class="ms"><b>${avgMin}</b><span>平均单次(分)</span></div>`);
-  showEl("#revFocusHeat");showEl("#revFocusTrend");
-  safeDraw(()=>drawBars($("#revFocusHeat"),["一","二","三","四","五","六","日"],wkBase.map(m=>hrs(m)),"#6F9FD6"));
-  safeWrite("#revFocusHeatLegend",`<span>各星期专注时长(h) · 黄金时段一目了然</span>`);
-  safeDraw(()=>drawLine($("#revFocusTrend"),dayLabels,focusTrend,focusTrend.map(v=>Math.round(v*1.3*10)/10)));
+    '<div class="ms"><b>'+hrs(focusMin)+'</b><span>总时长(h)</span></div>'+
+    '<div class="ms"><b>'+pomoCnt+'</b><span>番茄数</span></div>'+
+    '<div class="ms"><b>'+avgMin+'</b><span>平均(min)</span></div>'+
+    '<div class="ms"><b>'+rangeLen+'</b><span>专注天数</span></div>');
+  showEl("#revFocusBars");
+  try{drawBars($("#revFocusBars"),dayLabels,dates.map((_,i)=>wkBase[i%7]/60),"#6F9FD6");}catch(e){}
+  try{const heat=$("#revFocusHeat");if(heat){heat.innerHTML='';["一","二","三","四","五","六","日"].forEach((n,i)=>{const d=document.createElement("div");d.className="fh-day";const mx=Math.max(...wkBase,1);d.innerHTML='<div class="fh-bar" style="height:'+Math.round(wkBase[i]/mx*60)+'px;background:#6F9FD6"></div><div class="fh-val">'+Math.round(wkBase[i]/6)/10+'h</div><div class="fh-label">'+n+'</div>';heat.appendChild(d);});}}catch(e){}
   /* 习惯打卡 */
-  safeWrite("#revHabitStats",demoHd.map(o=>`<div class="habit-row"><span class="dot" style="background:${o.h.color}"></span><b>${o.h.emoji} ${esc(o.h.name)}</b><span class="hr">连续${o.streak}天 · 完成率${o.rate}%</span></div>`).join(""));
-  /* 夸夸 + 改进：复用现有函数，传示例 ctx 生成基于示例数字的文案 */
-  const demoTasks=[];
-  for(let i=0;i<doneN;i++)demoTasks.push({done:true,abandoned:false,due:dates[i%rangeLen],time:"10:00",listId:null});
-  const revCtx={planned:demoTasks,doneT:demoTasks.filter(t=>t.done),rate,schedRate,schedDone:liftDone,schedTotal:liftTotal,
-    focusMin,pomoCnt,avgMin,habitRate,habitDays,overdueCnt,prevRate:Math.max(rate-5,0),hd:demoHd,dates,isYear,isDay,lists:state.lists||[],tasks:state.tasks||[]};
-  try{buildPraise(revCtx);}catch(e){console.error("示例夸夸失败",e);}
-  try{buildImprove(revCtx);}catch(e){console.error("示例改进失败",e);}
+  safeWrite("#revHabitStats",demoHd.map(o=>'<div class="habit-row"><span class="dot" style="background:'+o.h.color+'"></span><b>'+o.h.emoji+' '+esc(o.h.name)+'</b><span class="hr">连续'+o.streak+'天 · 完成率'+o.rate+'%</span></div>').join(''));
+  /* AI 小结 */
+  safeWrite("#revAISummary",'<div class="rv-panel-hd"><h3>🤖 AI 智能小结（示例）</h3></div><div class="rv-panel-body"><div class="ai-body"><div class="pp">📊 任务完成率 <b>'+rate+'%</b>（'+doneN+'/'+plannedN+'）</div><div class="pp good">🍅 专注时长 <b>'+hrs(focusMin)+'h</b></div><div class="pp">✅ 习惯达成率 <b>'+habitRate+'%</b></div><div class="pp">📝 以上为示例数据，开始记录后会自动替换为真实复盘</div></div></div>');
   /* 日历热力图：示例着色 */
   renderRevCalDemo();
 }
@@ -3337,7 +3843,7 @@ $("#mask").addEventListener("click",e=>{if(e.target===$("#mask"))closeModal();})
 /* SW 注册地址带版本号：每次部署改版本，强制浏览器重新拉取 sw.js（避免浏览器缓存旧 SW 导致永远拿不到新代码）。
    同时监听 controllerchange：新 SW 接管时自动刷新一次，确保用户刷新后即看到最新版。 */
 if("serviceWorker" in navigator){
-  const SW_URL="sw.js?__v=jihua-v51";
+  const SW_URL="sw.js?__v=jihua-v64";
   window.addEventListener("load",()=>{
     navigator.serviceWorker.register(SW_URL).catch(()=>{});
     /* 主动检查 SW 更新：即使页面长期不刷新（如手机后台标签页），部署后也能拉到新版 */
@@ -3380,18 +3886,26 @@ function showUpdateBadge(){
 }
 /* 页面加载后 600ms 触发一次（DOM 已就绪、SW 检测完后），确保不与首屏渲染抢帧 */
 window.addEventListener("load",()=>setTimeout(showUpdateBadge,600));
-/* 跨设备同步 + HTML 自身版本自检：v42 起，部署更新必达
+/* v59 跨设备同步 + HTML 自身版本自检：v42 起，部署更新必达
    - 拉 version.json 检测 app.js BUILD 落后：落后就 reload
    - 读 <meta name="app-build"> 检测 HTML 自身版本落后：落后就 reload（根治 iOS PWA 钉死旧 HTML 的 bug）
+   - 防抖：5 分钟内只允许 reload 一次，URL 带 ?v= 时跳过（防止 version.json 错配死循环）
    - 每 30s 巡检一次，保证后台标签页/手机锁屏回来都能拉到新版本 */
 (function autoSync(){
+  const SYNC_KEY="goalday_lastSyncReload";
+  const LIMIT=5*60*1000;   /* 5 分钟冷却 */
   const check=()=>{
+    /* 0. 防抖：5 分钟内已 reload 过就跳过 */
+    try{const last=parseInt(localStorage.getItem(SYNC_KEY)||"0",10);if(last&&Date.now()-last<LIMIT)return;}catch(e){}
+    /* 0.5 URL 已带 v= 参数 → 说明刚刷新过，跳过避免循环 */
+    if(location.search.includes("v="))return;
     /* 1. 检查 HTML 自身版本（关键修复：iOS PWA 把旧 HTML 缓存钉死，光改 app.js 没用） */
     try{
       const meta=document.querySelector('meta[name="app-build"]');
       const htmlBuild=meta?parseInt(meta.getAttribute('content'),10):0;
       if(htmlBuild && htmlBuild!==BUILD){
         console.log(`[autoSync] HTML 旧版 ${htmlBuild} → 强制更新到 ${BUILD}`);
+        try{localStorage.setItem(SYNC_KEY,String(Date.now()));}catch(e){}
         location.replace(location.pathname+'?v='+BUILD+'_'+Date.now());
         return;
       }
@@ -3400,11 +3914,14 @@ window.addEventListener("load",()=>setTimeout(showUpdateBadge,600));
     fetch("version.json",{cache:"no-store"}).then(r=>r.json()).then(d=>{
       if(d&&typeof d.build==="number"&&d.build!==BUILD){
         console.log(`[autoSync] JS 旧版 ${BUILD} → 强制更新到 ${d.build}`);
+        try{localStorage.setItem(SYNC_KEY,String(Date.now()));}catch(e){}
         location.replace(location.pathname+'?v='+d.build+'_'+Date.now());
       }
     }).catch(()=>{});
   };
-  setTimeout(check,2000);
+  /* 页面加载时清除旧防抖标记，允许首次 sync 正常检查 */
+  try{localStorage.removeItem(SYNC_KEY);}catch(e){}
+  setTimeout(check,3000);   /* 改为 3s，让页面先渲染完 */
   setInterval(check,30000);
 })();
 /* 灾难恢复：localStorage 被清空/损坏时，用 IndexedDB 镜像回灌 */
@@ -3435,7 +3952,12 @@ function initReviewRefresh(){
   sb.addEventListener("touchmove",e=>{if(!pull||!e.touches||!e.touches[0])return;const dy=e.touches[0].clientY-y0;if(dy>70){pull=false;renderReview();}},{passive:true});
   sb.addEventListener("touchend",()=>{pull=false;});
 }
-window.addEventListener("resize",()=>{if(state.activeTab==="review")renderReview();});
+/* v64：resize 防抖 + 强制重绘（canvas 宽度需随视口重算，否则旋转/缩放后图表拉伸失真）。
+   用「清空缓存 key」触发一次完整重绘，而非定时狂刷；orientationchange 一并覆盖移动端旋转。 */
+let __revResizeT=null;
+function __revResize(){ if(state.activeTab!=="review")return; clearTimeout(__revResizeT); __revResizeT=setTimeout(()=>{ lastRevKey=""; renderReview(); }, 180); }
+window.addEventListener("resize",__revResize);
+window.addEventListener("orientationchange",__revResize);
 /* 复盘刷新机制（最终版）：仅「进入/切回/手动/唤醒」时刷新一次，页面静止后禁止任何自动刷新 */
 $("#revRefresh").addEventListener("click",()=>{renderReview(true);});
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden && state.activeTab==="review"){renderReview();} });
@@ -3451,3 +3973,11 @@ initReviewRefresh();
   if(done)done.addEventListener("click",blurAndHide);
   if(hide)hide.addEventListener("click",blurAndHide);
 })();
+/* 严格模式下顶层函数声明不会自动挂载到 window；plus.js 等后续脚本通过 window.xxx 包装原函数，必须显式暴露 */
+window.renderReview=renderReview;
+window.renderTodo=renderTodo;
+window.renderHabit=renderHabit;
+window.renderFocus=renderFocus;
+window.renderAll=renderAll;
+window.renderTab=renderTab;
+/* app.js 加载完成 */

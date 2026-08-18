@@ -8,17 +8,17 @@
 <meta name="theme-color" content="#F5F0EB">
 <!-- v44：复盘空状态+日期选择器+刷新反馈。HTML 自身加版本戳，app.js 启动时自动比对，
      不一致就 location.replace 强制重抓，从此每次部署用户都能拿到新结构。 -->
-<meta name="app-build" content="51">
+<meta name="app-build" content="64">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<link rel="manifest" href="manifest.webmanifest?__v=jihua-v51">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png?__v=jihua-v51">
+<link rel="manifest" href="manifest.webmanifest?__v=jihua-v64">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png?__v=jihua-v64">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="计划册">
 <link rel="icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?__v=jihua-v64">
 </head>
 <body>
 <!-- 固定全屏背景层：覆盖灵动岛/刘海安全区，杜绝暗边 -->
@@ -26,12 +26,20 @@
 
 <!-- ═══════════ Tab1 待办 · 收集箱 + 双栏周计划 ═══════════ -->
 <section class="page" id="page-todo">
-  <!-- 第一层：收集箱（清单列表） -->
+  <!-- 第一层：待办首页 / 收集箱 / 待分类 / 我的清单 -->
   <div id="todoHome">
     <header class="page-head">
       <button class="icon-btn" id="drawerBtn">☰</button>
+      <button class="icon-btn" id="btnGoHome" style="display:none">‹</button>
       <h1 id="todoTitle">📋 待办</h1>
+      <button class="icon-btn" id="btnMore" style="display:none">⋯</button>
     </header>
+    <!-- 更多菜单（灵感收集箱右上角 ⋯ ） -->
+    <div class="more-menu" id="moreMenu" hidden>
+      <button data-more="triage">📂 查看待分类</button>
+      <button data-more="trash">🗑️ 回收站</button>
+      <button data-more="stats">📊 灵感统计</button>
+    </div>
     <div class="scroll-body" id="todoBody"></div>
   </div>
 
@@ -221,10 +229,9 @@
   </div>
 </section>
 
-<!-- ═══════════ Tab4 复盘（v51：时间维度切换+两层布局+AI小结） ═══════════ -->
+<!-- ═══════════ Tab4 复盘 v52：可视化数据大盘 ═══════════ -->
 <section class="page" id="page-review">
   <header class="page-head center"><h1>📊 复盘</h1><button id="revRefresh" class="rev-refresh" title="刷新数据">↻</button></header>
-  <!-- 时间维度 Tab：周 / 月 / 年，全页数据一键同步切换 -->
   <div class="sub-tabs" id="revDims">
     <button data-d="week" class="active">本周</button>
     <button data-d="month">本月</button>
@@ -232,64 +239,75 @@
   </div>
   <div class="scroll-body">
     <div id="dataView">
-      <!-- 时间回溯：‹ › 切换上一/下一周期 + 回到当前 -->
+      <!-- 周期导航 -->
       <div class="rev-nav-row">
-        <button class="rev-nav" id="revPrev" title="上一周期">‹</button>
+        <button class="rev-nav" id="revPrev">‹</button>
         <span id="revRangeLabel" class="rev-range"></span>
-        <button class="rev-nav" id="revNext" title="下一周期">›</button>
-        <button id="revToday" class="rev-today-btn" title="回到当前周期">回到当前</button>
+        <button class="rev-nav" id="revNext">›</button>
+        <button id="revToday" class="rev-today-btn">📍</button>
       </div>
-      <!-- 自动小标题：如「2026年8月 整体执行复盘」 -->
       <div id="revSubtitle" class="rev-subtitle"></div>
 
-      <!-- ═══ 第一层：总体概览区（核心大盘） ═══ -->
-      <div class="rev-section-title">📋 总体概览</div>
-      <div class="stat-cards" id="revSummary"></div>
-      <div class="rev-extra-stats" id="revExtraStats"></div>
-
-      <!-- ═══ 第二层：细分数据拆解区 ═══ -->
-      <div class="rev-section-title">📊 细分数据拆解</div>
-
-      <!-- 模块一：任务清单复盘 -->
-      <div class="panel">
-        <h3 class="ptt">📋 任务清单复盘</h3>
-        <div id="revTaskStats" class="mini-stats"></div>
-        <div id="revTaskClass" class="rev-class-list"></div>
-        <canvas id="revQuadrant" height="180"></canvas>
-        <div id="revQuadrantLegend" class="legend"></div>
-        <canvas id="revTaskTrend" height="150"></canvas>
-        <div id="revTaskTrendLegend" class="legend"></div>
+      <!-- ═══ KPI 概览大盘 ═══ -->
+      <div id="revSummary" class="kpi-grid">
+        <div class="kpi-card"><div class="kpi-ring"><svg viewBox="0 0 72 72"><circle cx="36" cy="36" r="28"/></svg><span class="kpi-val">--</span></div><div class="kpi-label">任务完成率</div></div>
+        <div class="kpi-card"><div class="kpi-ring"><svg viewBox="0 0 72 72"><circle cx="36" cy="36" r="28"/></svg><span class="kpi-val">--</span></div><div class="kpi-label">日程执行率</div></div>
+        <div class="kpi-card"><div class="kpi-num">--</div><div class="kpi-unit">分钟</div><div class="kpi-label">专注时长</div></div>
+        <div class="kpi-card"><div class="kpi-ring"><svg viewBox="0 0 72 72"><circle cx="36" cy="36" r="28"/></svg><span class="kpi-val">--</span></div><div class="kpi-label">习惯达成率</div></div>
       </div>
 
-      <!-- 模块二：日程执行复盘 -->
-      <div class="panel">
-        <h3 class="ptt">🗓️ 日程执行复盘</h3>
-        <div id="revSchedStats" class="mini-stats"></div>
-        <canvas id="revUtil" height="170"></canvas>
-        <div id="revUtilLegend" class="legend"></div>
-        <div id="revCrossWeek" class="rev-cross-week"></div>
+      <!-- ═══ 任务复盘模块 ═══ -->
+      <div class="rv-panel" id="rvTaskPanel">
+        <div class="rv-panel-hd"><h3>📋 任务复盘</h3><span class="rv-panel-badge" id="rvTaskBadge"></span></div>
+        <div id="revTaskStats" class="rv-mini-grid"></div>
+        <div class="rv-charts-row">
+          <div class="rv-chart-box"><div class="rv-chart-title">完成状态分布</div><canvas id="revTaskPie" height="200"></canvas></div>
+          <div class="rv-chart-box"><div class="rv-chart-title">每日完成趋势</div><canvas id="revTaskTrend" height="200"></canvas></div>
+        </div>
+        <div id="revTaskClass" class="rv-task-class"></div>
       </div>
 
-      <!-- 模块三：番茄专注复盘 -->
-      <div class="panel">
-        <h3 class="ptt">🍅 番茄专注复盘</h3>
-        <div id="revFocusStats" class="mini-stats"></div>
-        <canvas id="revFocusHeat" height="130"></canvas>
-        <div id="revFocusHeatLegend" class="legend"></div>
-        <canvas id="revFocusTrend" height="170"></canvas>
-        <div id="revFocusTrendLegend" class="legend"></div>
+      <!-- ═══ 专注复盘模块 ═══ -->
+      <div class="rv-panel" id="rvFocusPanel">
+        <div class="rv-panel-hd"><h3>🍅 专注复盘</h3><span class="rv-panel-badge" id="rvFocusBadge"></span></div>
+        <div id="revFocusStats" class="rv-mini-grid"></div>
+        <div class="rv-chart-box rv-chart-wide">
+          <div class="rv-chart-title">每日专注时长 (分钟)</div>
+          <canvas id="revFocusBars" height="220"></canvas>
+        </div>
+        <div id="revFocusHeat" class="rv-focus-heat"></div>
       </div>
 
-      <!-- 模块四：习惯打卡复盘 -->
-      <div class="panel">
-        <h3 class="ptt">✅ 习惯打卡复盘</h3>
-        <div id="revHabitStats"></div>
+      <!-- ═══ 习惯打卡模块 ═══ -->
+      <div class="rv-panel" id="rvHabitPanel">
+        <div class="rv-panel-hd"><h3>✅ 习惯打卡</h3><span class="rv-panel-badge" id="rvHabitBadge"></span></div>
+        <div id="revHabitStats" class="rv-habit-rows"></div>
         <div class="heatmap" id="revCal"></div>
-        <div id="revHabitBest" class="rev-habit-best"></div>
+        <div id="revHabitBest" class="rv-hb-best"></div>
       </div>
 
-      <!-- ═══ 底部：智能复盘小结 ═══ -->
-      <div class="panel rev-ai-panel" id="revAISummary"></div>
+      <!-- ═══ 日程执行模块 ═══ -->
+      <div class="rv-panel" id="rvSchedPanel">
+        <div class="rv-panel-hd"><h3>🗓️ 日程执行</h3><span class="rv-panel-badge" id="rvSchedBadge"></span></div>
+        <div id="revSchedStats" class="rv-mini-grid"></div>
+        <canvas id="revUtil" height="180"></canvas>
+        <div id="revUtilLegend" class="legend"></div>
+      </div>
+
+      <!-- ═══ AI 智能复盘小结 ═══ -->
+      <div class="rv-panel rev-ai" id="revAISummary"></div>
+
+      <!-- 空状态引导 -->
+      <div class="rv-empty-guide" id="revEmptyGuide" style="display:none">
+        <div class="rv-empty-icon">🌟</div>
+        <div class="rv-empty-title">开始你的复盘之旅</div>
+        <div class="rv-empty-sub">在使用以下功能后可查看数据：</div>
+        <div class="rv-empty-steps">
+          <div class="rv-step"><span class="rv-step-num">1</span>在「待办」创建任务并完成</div>
+          <div class="rv-step"><span class="rv-step-num">2</span>在「打卡」添加日常习惯</div>
+          <div class="rv-step"><span class="rv-step-num">3</span>在「专注」记录番茄钟</div>
+        </div>
+      </div>
     </div>
     <div id="annualEntry"></div>
   </div>
@@ -345,7 +363,7 @@
       </div>
       <div class="panel set-group">
         <h3 class="ptt">ℹ️ 关于</h3>
-        <p class="set-note">计划册 v48 (jihua-v51) · 灵感收集箱(直接「分类」归入清单/待分类同源) × 日清单便签 + 日程窄时间轴(00–23·卡片显示清单分类名称·首屏自动滚到当前时间) × 复盘自定义周期+空状态兜底(每模块独立空提示+刷新旋转反馈+日期选择器) × 全量持久化/云同步持续在线<br>莫兰迪/马卡龙奶油风 · 手账质感 · 离线 PWA</p>
+        <p class="set-note">计划册 v64 (jihua-v64) · 灵感收集箱(直接「分类」归入清单/待分类同源) × 日清单便签 + 日程窄时间轴(00–23·卡片显示清单分类名称·首屏自动滚到当前时间) × 复盘自定义周期+空状态兜底(每模块独立空提示+刷新旋转反馈+日期选择器) × 全量持久化/云同步持续在线<br>莫兰迪/马卡龙奶油风 · 手账质感 · 离线 PWA</p>
       </div>
       <div class="panel set-group">
         <h3 class="ptt">🗂️ 数据管理</h3>
@@ -353,7 +371,7 @@
           <span class="cd-t">🗑️ 清空当前数据</span>
           <span class="cd-s">清除所有演示数据，重新开始使用（保留调色盘收藏与主题配色设置）</span>
         </button>
-        <div class="app-ver">计划册 v48 (jihua-v51) · 莫兰迪 / 马卡龙奶油风</div>
+        <div class="app-ver">计划册 v64 (jihua-v64) · 莫兰迪 / 马卡龙奶油风</div>
       </div>
     </div>
   </div>
@@ -512,8 +530,8 @@
   <div class="scroll-body" id="annualBody"></div>
 </section>
 
-<script src="app.js?__v=jihua-v51"></script>
-<script src="plus.js?__v=jihua-v51"></script>
-<script src="sync.js?__v=jihua-v51"></script>
+<script src="app.js?__v=jihua-v64"></script>
+<script src="plus.js?__v=jihua-v64"></script>
+<script src="sync.js?__v=jihua-v64"></script>
 </body>
 </html>
